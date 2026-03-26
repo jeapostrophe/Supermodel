@@ -101,6 +101,56 @@ For network support:
 make -f Makefiles/Makefile.OSX NET_BOARD=1
 ```
 
+## Libretro Builds
+
+The libretro core is built separately from the standalone emulator binaries.
+This repository includes convenience scripts for the most common targets:
+
+- `build32.bat` for a Win32 libretro DLL
+- `build64.bat` for a Win64 libretro DLL
+- `buildlinux.bat` for a Linux libretro `.so`
+
+### Windows
+
+The Windows scripts expect MSYS2 to be installed in `C:\msys64`.
+They build the libretro core with the matching MinGW toolchain and place the
+resulting binaries in:
+
+- `lib32/supermodel_libretro.dll`
+- `lib64/supermodel_libretro.dll`
+
+Run the scripts from a regular Command Prompt:
+
+```bat
+build32.bat
+build64.bat
+```
+
+### Linux
+
+`buildlinux.bat` stages the source tree to a remote Linux machine over SSH,
+builds the libretro core there, and copies the resulting `.so` back into the
+local `lib64/` folder. The script is meant to keep the remote tree persistent
+so incremental rebuilds are faster.
+
+If you are building manually on Linux, the libretro core can also be built
+directly with:
+
+```bash
+make -f Makefiles/Makefile.UNIX LIBRETRO=1 BITS=64
+```
+
+### RetroArch assets
+
+For RetroArch, the core binary should be accompanied by the matching
+`supermodel_libretro.info` file. The release assets published for this fork
+include:
+
+- `supermodel_libretro-win32.dll`
+- `supermodel_libretro-win64.dll`
+- `supermodel_libretro-linux.so`
+- `supermodel_libretro.info`
+
 ### Note: running on macOS
 If you try and run a macOS binary that was downloaded from the internet and/or built on a different machine, you need to grant macOS permission to execute the binary (just 1-time):
 
