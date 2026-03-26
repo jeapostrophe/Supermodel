@@ -1,54 +1,69 @@
----
-name: Build Supermodel
+name: Build Supermodel Libretro
 
 on:
   workflow_call:
     inputs:
       opt:
-        description: "Optimization flags for compiler (e.g. -O3 -g)"
+        description: "Optimization flags for the compiler (for example -O3 or -O3 -g)"
         type: string
         default: "-O3"
+  workflow_dispatch:
+    inputs:
+      opt:
+        description: "Optimization flags for the compiler (for example -O3 or -O3 -g)"
+        type: string
+        default: "-O3"
+  push:
+    branches:
+      - master
+    paths:
+      - "Src/**"
+      - "Makefiles/**"
+      - "Config/**"
+      - "build32.bat"
+      - "build64.bat"
+      - "buildlinux.bat"
+      - ".github/workflows/build.yml"
+  pull_request:
+    branches:
+      - master
+    paths:
+      - "Src/**"
+      - "Makefiles/**"
+      - "Config/**"
+      - "build32.bat"
+      - "build64.bat"
+      - "buildlinux.bat"
+      - ".github/workflows/build.yml"
 
 jobs:
-  Build:
-    strategy:
-      matrix:
-        os:
-          - windows-latest
-          - ubuntu-latest
-          - macos-latest
-        include:
-          - os: windows-latest
-            makefile: Makefile.Win32
-            shell: msys2 {0}
-            pkg_pattern: "pkg/supermodel-*.zip"
-          - os: ubuntu-latest
-            makefile: Makefile.UNIX
-            shell: bash
-            pkg_pattern: "pkg/supermodel-*.tgz"
-          - os: macos-latest
-            makefile: Makefile.OSX
-            shell: bash
-            pkg_pattern: "pkg/supermodel-*.tgz"
-    runs-on: ${{ matrix.os }}
+  windows:
+    name: Windows ${{ matrix.arch }}
+    runs-on: windows-latest
     defaults:
       run:
-        shell: ${{ matrix.shell }}
-    env:
-      OPT_INPUT: ${{ inputs.opt }}
+        shell: msys2 {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: win32
+            bat: build32.bat
+            artifact_name: supermodel-libretro-windows32
+            artifact_file: supermodel_libretro-win32.dll
+            source_file: lib32/supermodel_libretro.dll
+          - arch: win64
+            bat: build64.bat
+            artifact_name: supermodel-libretro-windows64
+            artifact_file: supermodel_libretro-win64.dll
+            source_file: lib64/supermodel_libretro.dll
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Fetch full git history (needed for changelog.sh script)
-      
-      - name: Install Ubuntu build dependencies
-        if: startsWith(matrix.os, 'ubuntu')
-        run: |
-          sudo apt update
-          sudo apt install -y libsdl2-dev libsdl2-net-dev libglu1-mesa-dev
-          
-      - name: Install Windows build dependencies
-        if: startsWith(matrix.os, 'windows')
+          fetch-depth: 0
+
+      - name: Install MSYS2 toolchain
         uses: msys2/setup-msys2@v2
         with:
           update: true
@@ -57,58 +72,63 @@ jobs:
             zip
             unzip
             git
-            mingw64/mingw-w64-x86_64-gcc
-            mingw64/mingw-w64-x86_64-SDL2
-            mingw64/mingw-w64-x86_64-SDL2_net
+            mingw-w64-i686-gcc
+            mingw-w64-i686-SDL2
+            mingw-w64-i686-SDL2_net
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_net
 
-      - name: Build Supermodel
+      - name: Build ${{ matrix.arch }}
+        run: cmd.exe /c ${{ matrix.bat }}
+
+      - name: Stage artifact
+        shell: bash
         run: |
-          make -f Makefiles/${{ matrix.makefile }} NET_BOARD=1 OPT="${OPT_INPUT:-"-O3"}" GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} SILENT=
-          
-      - name: Validate build
-        run: |
-          # Find the executable in bin/ directory (bin64/ on Windows)
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            ./bin64/supermodel.exe -print-games
-          else
-            ./bin/supermodel -print-games
-          fi
-          # Remove auto-generated default Supermodel.ini. We do not want to bundle this into packages.
-          rm Config/Supermodel.ini
-          
-      - name: Create package
-        run: |
-          make -f Makefiles/${{ matrix.makefile }} pkg NET_BOARD=1 GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} SILENT=
-          
-      - name: Find and upload package
-        run: |
-          # Find the package file created by Makefile
-          PKG_FILES=(${{ matrix.pkg_pattern }})
-          if [ ${#PKG_FILES[@]} -eq 0 ] || [ ! -f "${PKG_FILES[0]}" ]; then
-            echo "No package files found matching pattern: ${{ matrix.pkg_pattern }}"
-            echo "Available files in pkg/:"
-            ls -la pkg/ 2>/dev/null || echo "pkg directory is empty or doesn't exist"
-            exit 1
-          fi
-          
-          PKG_FILE="${PKG_FILES[0]}"
-          echo "Found package: $PKG_FILE"
-          
-          # Get version and create platform-specific name
-          VERSION=$(make -f Makefiles/${{ matrix.makefile }} version)
-          PLATFORM_LOWER=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
-          
-          # Copy package with platform-specific name
-          if [[ "$PKG_FILE" == *.zip ]]; then
-            NEW_NAME="supermodel-${VERSION}-${PLATFORM_LOWER}.zip"
-          else
-            NEW_NAME="supermodel-${VERSION}-${PLATFORM_LOWER}.tar.gz"
-          fi
-          
-          cp "$PKG_FILE" "$NEW_NAME"
-          echo "package_file=$NEW_NAME" >> $GITHUB_ENV
-          
-      - uses: actions/upload-artifact@v4
+          mkdir -p dist/${{ matrix.arch }}
+          cp "${{ matrix.source_file }}" "dist/${{ matrix.arch }}/${{ matrix.artifact_file }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: Supermodel-${{ runner.os }}
-          path: ${{ env.package_file }}
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.arch }}/${{ matrix.artifact_file }}
+
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y make git g++ libsdl2-dev libsdl2-net-dev libglu1-mesa-dev
+
+      - name: Build Linux libretro core
+        run: |
+          OPT_INPUT="${{ inputs.opt }}"
+          if [ -z "$OPT_INPUT" ]; then
+            OPT_INPUT="${{ github.event.inputs.opt }}"
+          fi
+          if [ -z "$OPT_INPUT" ]; then
+            OPT_INPUT="-O3"
+          fi
+          make -f Makefiles/Makefile.UNIX LIBRETRO=1 BITS=64 OPT="$OPT_INPUT" -j2
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist/linux
+          cp lib64/supermodel_libretro.so dist/linux/supermodel_libretro-linux.so
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: supermodel-libretro-linux
+          path: dist/linux/supermodel_libretro-linux.so
