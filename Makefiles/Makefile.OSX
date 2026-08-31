@@ -75,7 +75,11 @@ PLATFORM_LDFLAGS = -F./Frameworks $(SDL_LIBS) -lz -lm -lstdc++ -Wl,-rpath,@execu
 PLATFORM_DIRS = Frameworks/SDL2_net.framework Frameworks/SDL2.framework
 PLATFORM_BINARY_EXTENSION =
 PLATFORM_DYLIB_EXTENSION = .dylib
-PLATFORM_DYLIB_FLAG = -dylib
+# NB: `-dylib` is an ld64 option, NOT a clang driver option: the driver silently
+# discards it ("argument unused during compilation") and links a PIE *executable*
+# (MH_EXECUTE), which macOS will still dlopen but iOS will refuse to load from an
+# app bundle. `-dynamiclib` is the driver spelling and is what produces MH_DYLIB.
+PLATFORM_DYLIB_FLAG = -dynamiclib -install_name @rpath/$(SUPERMODEL_DYLIB)
 
 #
 # GitHub token
