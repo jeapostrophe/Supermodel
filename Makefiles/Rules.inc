@@ -87,7 +87,14 @@ endif
 #
 # Construct the compiler (C and C++) and linker flags
 #
-COMMON_CFLAGS = -c $(ARCH) $(OPT) $(WARN) $(addprefix -I,$(sort $(INCLUDE_DIRS))) -DGLEW_STATIC $(SUPERMODEL_BUILD_FLAGS)
+#
+# PLATFORM_ARCH is how a cross-compiling platform makefile (Makefile.iOS) gets
+# -arch/-isysroot/-mios-version-min onto every compile. It cannot use ARCH for
+# that: platform makefiles include this file, so the `ARCH =` a few lines up
+# runs last and would wipe out anything they set. Native platforms leave
+# PLATFORM_ARCH empty and nothing changes for them.
+#
+COMMON_CFLAGS = -c $(ARCH) $(PLATFORM_ARCH) $(OPT) $(WARN) $(addprefix -I,$(sort $(INCLUDE_DIRS))) -DGLEW_STATIC $(SUPERMODEL_BUILD_FLAGS)
 ifeq ($(strip $(LIBRETRO)),1)
 COMMON_CFLAGS += -fPIC
 endif
@@ -227,6 +234,16 @@ ifeq ($(strip $(LIBRETRO)),1)
 	SRC_FILES += \
 		Src/OSD/SDL/LibRetro.cpp
 endif
+
+#
+# Per-platform source exclusions.
+#
+# A platform makefile may set EXCLUDE_SRC_FILES to drop translation units that
+# cannot be built (or are simply unreachable) for that target -- e.g. the SDL
+# OSD, imgui and the SDL2_net netboard on iOS, none of which the libretro entry
+# points can reach. Paths must match the SRC_FILES spelling exactly.
+#
+SRC_FILES := $(filter-out $(EXCLUDE_SRC_FILES),$(SRC_FILES))
 
 #
 # Sorted-path compile order
@@ -430,12 +447,22 @@ MUSASHI_OUTFILE = $(OBJ_DIR)/m68kmake.exe # do not remove the .exe suffix!
 MUSASHI_CFLAGS = -ISrc/CPU/68K/Musashi -I$(OBJ_DIR) -DINLINE="static inline" -Wno-unused-variable
 MUSASHI_LDFLAGS = -o $(MUSASHI_OUTFILE) $(OBJ_DIR)/m68kmake.o -s
 
+#
+# m68kmake is a BUILD-TIME code generator: it must run on the build machine, so
+# when cross-compiling it cannot be built with $(CC)/$(CFLAGS). Platform
+# makefiles that cross-compile (Makefile.iOS) override HOST_CC/HOST_LD/
+# HOST_CFLAGS; native builds inherit the target toolchain unchanged.
+#
+HOST_CC ?= $(CC)
+HOST_LD ?= $(LD)
+HOST_CFLAGS ?= $(CFLAGS)
+
 $(MUSASHI_OUTFILE): Src/CPU/68K/Musashi/m68kmake.c Src/CPU/68K/Musashi/m68k_in.c | $(OBJ_DIR)
 	$(info --------------------------------------------------------------------------------)
 	$(info Compiling              : $< -> $(OBJ_DIR)/m68kmake.o)
-	$(SILENT)$(CC) $< $(CFLAGS) -o $(OBJ_DIR)/m68kmake.o
+	$(SILENT)$(HOST_CC) $< $(HOST_CFLAGS) -o $(OBJ_DIR)/m68kmake.o
 	$(info Linking                : $(MUSASHI_OUTFILE))
-	$(SILENT)$(LD) $(MUSASHI_LDFLAGS)
+	$(SILENT)$(HOST_LD) $(MUSASHI_LDFLAGS)
 
 $(OBJ_DIR)/m68kops.h $(OBJ_DIR)/m68kops.c $(OBJ_DIR)/m68kopac.c $(OBJ_DIR)/m68kopdm.c $(OBJ_DIR)/m68kopnz.c:	$(MUSASHI_OUTFILE) Src/CPU/68K/Musashi/m68k_in.c Src/CPU/68K/Musashi/m68k.h Src/CPU/68K/Musashi/m68kconf.h | $(OBJ_DIR)
 	$(info Generating 68K emulator: $@)

@@ -381,3 +381,8 @@ pkg/
 
 
 
+
+# iOS cross-build output (Makefiles/Makefile.iOS sets BITS=-ios)
+bin-ios/
+lib-ios/
+obj-ios/
