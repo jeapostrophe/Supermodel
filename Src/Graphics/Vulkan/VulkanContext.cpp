@@ -364,19 +364,28 @@ bool VulkanContext::CreateImage(Image &out, uint32_t width, uint32_t height, uin
 		return false;
 	}
 
-	VkImageViewCreateInfo viewInfo = {};
-	viewInfo.sType		= VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	viewInfo.image		= out.image;
-	viewInfo.viewType	= VK_IMAGE_VIEW_TYPE_2D;
-	viewInfo.format		= format;
-	viewInfo.subresourceRange.aspectMask		= aspect;
-	viewInfo.subresourceRange.levelCount		= levels;
-	viewInfo.subresourceRange.layerCount		= 1;
-	if (m_vk.vkCreateImageView(m_device, &viewInfo, nullptr, &out.view) != VK_SUCCESS)
+	// A view is only legal on an image that can be sampled, stored or attached
+	// (VUID-VkImageViewCreateInfo-image-04441); a transfer-only image -- the
+	// R3DFrameBuffers depth copy -- gets none, and `view` stays null.
+	const VkImageUsageFlags viewableUsage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
+		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+		VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+	if (usage & viewableUsage)
 	{
-		ErrorLog("Vulkan: could not create an image view.\n");
-		DestroyImage(out);
-		return false;
+		VkImageViewCreateInfo viewInfo = {};
+		viewInfo.sType		= VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image		= out.image;
+		viewInfo.viewType	= VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format		= format;
+		viewInfo.subresourceRange.aspectMask		= aspect;
+		viewInfo.subresourceRange.levelCount		= levels;
+		viewInfo.subresourceRange.layerCount		= 1;
+		if (m_vk.vkCreateImageView(m_device, &viewInfo, nullptr, &out.view) != VK_SUCCESS)
+		{
+			ErrorLog("Vulkan: could not create an image view.\n");
+			DestroyImage(out);
+			return false;
+		}
 	}
 
 	out.format	= format;
