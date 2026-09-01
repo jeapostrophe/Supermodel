@@ -319,7 +319,22 @@ ifeq ($(strip $(RENDER_BACKEND)),vulkan)
 		Src/Graphics/Vulkan/FBO.cpp \
 		Src/Graphics/Vulkan/Render2D.cpp \
 		Src/Graphics/Vulkan/SuperAA.cpp \
-		Src/Graphics/Vul3D/Vul3D.cpp
+		Src/Graphics/Vul3D/Vul3D.cpp \
+		Src/Graphics/Vul3D/R3DShader.cpp \
+		Src/Graphics/Vul3D/R3DFrameBuffers.cpp \
+		Src/Graphics/Vul3D/R3DScrollFog.cpp \
+		Src/Graphics/Vul3D/TextureBank.cpp \
+		Src/Graphics/Vul3D/VBO.cpp
+
+	#
+	# Five of those basenames also exist in Src/Graphics/New3D, which stays in
+	# the build for its GL-free translation units -- and VPATH is searched in
+	# order, with INCLUDE_DIRS sorted, so "New3D" would win over "Vul3D" and
+	# R3DShader.o would silently be built from the OpenGL source. Putting the
+	# mirror directories in front is what stops that; see the same hazard, from
+	# the other direction, at the INCLUDE_DIRS comment below.
+	#
+	VPATH_PRIORITY_DIRS += Src/Graphics/Vul3D/ Src/Graphics/Vulkan/
 
 	ifeq (,$(filter Src/OSD/iOS/iOSOSD.cpp,$(SRC_FILES)))
 		SRC_FILES += Src/OSD/iOS/iOSOSD.cpp
@@ -509,7 +524,7 @@ AUTODEPS := $(patsubst %.o,%.d,$(OBJ_FILES))
 # VPATH is the search path for files. This trick allows a single %.cpp rule to
 # be matched against files in sub-directories of Src/.
 #
-VPATH = $(INCLUDE_DIRS)
+VPATH = $(VPATH_PRIORITY_DIRS) $(INCLUDE_DIRS)
 
 #
 # Compilation rules that both auto-generate the dependency files and compile

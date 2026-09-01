@@ -6,8 +6,14 @@ brief and the code disagree the code wins, and the paragraphs marked
 
 Unit A is landed: the vendored headers, the `RENDER_BACKEND` seam, the
 `VulkanContext`/`VulkanShader` foundation, the 2D layer, SuperAA, the pointer
-overlay and the whole libretro wiring. `Src/Graphics/Vul3D/Vul3D.{h,cpp}` is a
-stub that renders nothing; unit B replaces it with the port of New3D.
+overlay and the whole libretro wiring.
+
+Unit B is landed: the 3D renderer itself, a per-file, per-function translation
+of `Src/Graphics/New3D/`. Its review artefact is the diff against the original --
+`diff -u Src/Graphics/New3D/New3D.cpp Src/Graphics/Vul3D/Vul3D.cpp` and the five
+other pairs -- in which every hunk is a GL-to-Vulkan edit or a commented
+insertion. (Normalise line endings first: the New3D sources are CRLF and the new
+files LF, so an unnormalised diff says nothing.)
 
 ## Why
 
@@ -72,8 +78,9 @@ Src/Graphics/Vul3D/                                      mirror of New3D, GL-tou
     R3DScrollFog.{h,cpp}
     TextureBank.{h,cpp}     R16_UINT 2048x1024, 12 mip levels
     VBO.{h,cpp}             one big vertex buffer, ROM verts then RAM verts
-    Shaders/                R3DShaderTriangles.{vert,frag}, R3DShaderCommon.glsl, R3DScrollFog.*,
-                            R3DFrameBuffersBase.*, R3DFrameBuffersTrans.* + generated *.spv.h
+    Shaders/                R3DShaderTriangles.{vert,frag}, R3DShaderCommon.glsl, R3DBlocks.glsl,
+                            R3DScrollFog.*, R3DFrameBuffersBase.*, R3DFrameBuffersTrans.*
+                            + generated *.spv.h and R3DBlockOffsets.h
     README.md               this file
 Scripts/build-spirv.sh                                    glslc over both Shaders/ dirs → *.spv.h
 ```
@@ -255,8 +262,41 @@ build. No global function pointers, no `volk`.
   `R3DFrameBuffers::Draw` onto the screen (or the SuperAA target).
   `m_primType` and the `QuadRendering` branch are dropped (log once if the config
   asks for quads).
+**Correction — five basenames collide with New3D's, and the build silently
+picked the wrong ones.** `Rules.inc` sets `VPATH` from a *sorted* `INCLUDE_DIRS`,
+and `Src/Graphics/New3D/` sorts before `Src/Graphics/Vul3D/` — so
+`obj-vk/R3DShader.o` (and `VBO`, `TextureBank`, `R3DFrameBuffers`,
+`R3DScrollFog`) built from the OpenGL source, with no diagnostic, until the link
+failed. Measured with `make … -n -B obj-vk/R3DShader.o`, which prints
+`Src/Graphics/New3D/R3DShader.cpp` with the fix removed and
+`Src/Graphics/Vul3D/R3DShader.cpp` with it. The fix is `VPATH_PRIORITY_DIRS`,
+which puts the two mirror directories in front of the sorted list — the same
+hazard as the `Src/Graphics/` correction above, from the other direction.
+
+**Correction — the C++ uniform mirrors are checked against the SPIR-V, not
+against a hand-typed copy of the GLSL.** A `static_assert(offsetof(…) == 96)` is
+a second copy of the layout, and it passes exactly when both copies drift
+together. So `Scripts/build-spirv.sh` compiles each Vul3D shader a *second* time
+with `-g -O0` (the `-O` build strips the member names), reads every
+`OpMemberDecorate … Offset` out of `spirv-dis`, and writes
+`Shaders/R3DBlockOffsets.h`; `R3DShader.cpp` and `R3DScrollFog.cpp` assert each
+member of each mirror struct against it, and the script errors if two shaders lay
+the same block out differently. Verified red on purpose: inserting one member
+into `R3DBlocks.glsl` fails the build naming `MeshBlock.fogIntensity`.
+
+**Correction — `vec3 lighting[2]` stays a `vec3` array in the GLSL.** std140 pads
+every element of a `vec3` array out to sixteen bytes (measured:
+`OpDecorate … ArrayStride 16`), so it has exactly the layout `vec4 lighting[2]`
+would — and the shader body keeps `sunVector = lighting[0]` and `lighting[1].x`
+verbatim, which a `vec4` would have broken. Only the *C++* mirror pads, and the
+same goes for the loose `vec3` uniforms. Booleans likewise stay `bool` in the
+blocks: glslang lays a block `bool` out as a 32-bit value, so the whole
+`if(textureEnabled)` body is verbatim against `int32_t` on the C++ side.
+
 - **`R3DShader`** — same public API (`SetMeshUniforms`, `SetModelStates`,
-  `SetViewportUniforms`, `SetLayer`, `DiscardAlpha`, `SetShader`, `Start`).
+  `SetViewportUniforms`, `SetLayer`, `DiscardAlpha`, `SetShader`, `Start`);
+  `GetVertexAttribPos` is gone, because attribute locations are declared in the
+  shader and baked into the pipeline.
   Uniforms become three std140 blocks: `ViewportBlock` (proj matrix, fog,
   lighting, spot, hardwareStep, cota), `ModelBlock` (modelMat, modelScale,
   nodeAlpha), `MeshBlock` (every per-mesh scalar/flag incl. `colourLayer`,
@@ -270,18 +310,59 @@ build. No global function pointers, no `volk`.
   `0x80`, write mask `0x80`; `layered` → a pipeline variant with
   `stencilOp(KEEP, INCR_AND_CLAMP, INCR_AND_CLAMP)`, compare EQUAL to 0 under
   mask `0x7F`, write mask `0x7F`. Pipelines are cached by
-  `{layer, layered, depthCompare}` — six at most — with dynamic viewport,
+  `{layer, stencil mode, depthCompare}` — twelve — with dynamic viewport,
   scissor, stencil reference / compare mask / write mask. Colour write masks
   implement `glDrawBuffers`: colour layer writes all three attachments, trans1
   only attachment 1, trans2 only attachment 2.
+  **Correction — the stencil half of the key is a *mode*, not `layered`.**
+  New3D's `SetMeshUniforms` writes the line-of-sight stencil configuration
+  whenever `noLosReturn` changes **even for a layered mesh**, and restores the
+  layered one only when `layered` itself changes — so a mesh really can be drawn
+  layered with LOS stencil ops. A pipeline keyed on `m->layered` would not
+  reproduce that; one keyed on an `m_stencilMode` assigned alongside every
+  `SetStencil`, in the same two branches, does.
+  **Correction — `glDepthFunc` becomes `R3DShader::SetDepthCompare`.** It could
+  have been folded into the layer (the colour pass is the GEQUAL one and the two
+  transparency passes the GREATER ones, with no exception in `RenderFrame`), but
+  keeping it a separate call keeps one GL line mapping to one Vulkan line, and
+  costs six pipelines nothing ever binds.
+  **Correction — the descriptor set is replaced, never updated.** A set that has
+  been bound in a recording command buffer may not be written again, so
+  `EnsureDescriptorSet` allocates a fresh one whenever the frame's uniform ring
+  or a texture-bank view changes under it — about eight per frame — and the
+  per-draw cost stays an `Append` plus a rebind with three dynamic offsets.
+  **Correction — the uniform ring is 16 MB, not 1.** `AppendUniforms` falls back
+  to a dedicated buffer for a request that does not fit, which is fine for a
+  texture upload but not here: R3DShader binds its blocks through a set that
+  names the *ring*, so an overflow is a skipped draw. A mesh costs up to three
+  appends, each rounded up to `minUniformBufferOffsetAlignment` (256 bytes on
+  MoltenVK), across twelve passes.
 - **`R3DFrameBuffers`** — one `RenderTarget` with three colour attachments +
-  D32S8, and a second D32S8 image for the depth copy. `SetFBO(layer)` selects the
-  write-mask variant (a pipeline concern, so it records the current layer for
-  `R3DShader`); `StoreDepth/RestoreDepth` → `CopyImage` of depth+stencil
+  D32S8, and a second D32S8 image for the depth copy (the GL original made a
+  whole second framebuffer for that, but only ever attached a depth/stencil
+  renderbuffer to it). `StoreDepth/RestoreDepth` → `CopyImage` of depth+stencil
   aspects; `Draw` → two full-screen quads (base then trans composite) with
   blending on, sampling the three colour images with `texelFetch`.
-- **`R3DScrollFog`** — full-screen quad pipeline writing all three attachments
-  with blending, depth test off; one UBO block.
+  **Correction — `SetFBO` does not record the layer for `R3DShader`, and it may
+  not skip an unchanged layer.** The write-mask variant is picked by
+  `R3DShader::SetLayer`, which `CVul3D::RenderFrame` calls immediately before
+  every `SetFBO` with the same value, so the two cannot diverge and `SetFBO` has
+  only the bind left to do. But unlike `glBindFramebuffer` it must do that bind
+  every time: `StoreDepth`, `RestoreDepth` and `ProcessLos` all end the open
+  render pass, and `SetFBO` is where the next one is opened.
+  **Correction — `CreateFBO` takes the destination render target.** The two
+  composite pipelines bake in the pass they draw into, and the AA target (one
+  colour attachment, no depth) is not compatible with the screen (one colour
+  attachment plus D32S8), so which one it is has to be known at creation.
+- **`R3DScrollFog`** — full-screen quad pipeline writing all three attachments,
+  depth test and depth write off; one UBO block.
+  **Correction — blending is OFF here, not on.** The brief said on; GL's state at
+  that point in the frame has it disabled. `Model3` renders the bottom tile layer
+  and then the 3D frame, and `CRender2D::DrawSurface` ends with
+  `glDisable(GL_BLEND)`; nothing between it and `New3D::DrawScrollFog` re-enables
+  it, and `DrawScrollFog`'s own trailing `glDisable(GL_BLEND)` is belt-and-braces,
+  not evidence. With blending on the fog would come out multiplied by
+  `scrollFog` over the black the buffer was just cleared to — a different image.
 - **`TextureBank`** — `R16_UINT` 2048×1024 with 12 mip levels
   (`VkImage` mips halve exactly as New3D's loop allocates). `UploadTextures`
   copies the sub-rectangle from texture RAM through the staging ring in one
@@ -290,6 +371,24 @@ build. No global function pointers, no `volk`.
   (only `texelFetch` is used, so filtering never matters). Both banks share one
   descriptor binding as `usampler2D textureBank[2]`; indexing by the
   `texturePage` uniform is legal in Vulkan GLSL (dynamically uniform).
+  **Correction — the copy carries the source stride; the rows are not packed.**
+  `bufferRowLength = 2048`, which is the texture-RAM width GL walked one row at a
+  time (a `glTexSubImage2D` per row) rather than set `GL_UNPACK_ROW_LENGTH` for.
+  One `vkCmdCopyBufferToImage` replaces the whole loop.
+  **Correction — the chain is 12 levels but `GetNumberOfLevels()` returns 11.**
+  New3D's allocation loop allocates one final 1×1 level *after* the increment
+  that produced the count it reports, and `CNew3D::UploadTextures` iterates the
+  reported count — so the extra level exists and is never uploaded. Vulkan needs
+  the real count at `vkCreateImage`, so the constructor allocates
+  `m_numLevels + 1` and `GetNumberOfLevels` keeps returning New3D's number.
+  **Correction — an upload asked for between frames is deferred, not dropped.**
+  `CReal3D::LoadState` uploads the whole sheet, and it runs from
+  `retro_unserialize`, outside `retro_run`'s frame. GL did it there and then; a
+  Vulkan upload is a command recorded into a command buffer that does not exist
+  yet, and `VulkanContext::UploadImage` correctly ignores it. So
+  `CVul3D::UploadTextures` records the request and `RenderFrame` performs it
+  before anything samples the banks — without that, every savestate load would
+  show the textures of the state that was loaded over.
 - **`VBO`** — a `DEVICE_LOCAL` `VkBuffer` of `sizeof(FVertex) * (MAX_RAM_VERTS +
   MAX_ROM_VERTS)`; `BufferSubData`/`AppendData` go through `UploadBuffer`.
 - **`ProcessLos`** — the `glReadPixels` of one depth/stencil texel becomes a
@@ -300,6 +399,17 @@ build. No global function pointers, no `volk`.
   exactly, because the CPU only ever reads the *front* buffer that was written
   during the previous frame. The value computation (`zVal = depth / NEAR_PLANE`,
   stencil bit 7 into the mantissa LSB) is copied verbatim. No mid-frame stall.
+  **Correction — the buffer is per frame SLOT, and with more than one slot the
+  value is that many frames old.** What `VulkanContext::Begin` guarantees is that
+  *this slot's* fence has signalled, not the previous frame's — so the readback
+  legible at the top of a frame is the one recorded by the last frame that used
+  the same slot. With the sync-index mask retro-trainer returns (one slot) that
+  is the previous frame and the timing is New3D's exactly; with N slots the
+  line-of-sight value a gun game reads is N-1 frames older than GL's.
+  **Correction — the bounds test GL did silently is written out.** `glReadPixels`
+  outside the framebuffer returns nothing and is not an error; a
+  `vkCmdCopyImageToBuffer` outside the image is not defined, so `ProcessLos`
+  checks the translated position against the target and skips it.
 - **Shaders** — GLSL 450 for Vulkan: `gl_VertexID` → `gl_VertexIndex`; loose
   `uniform`s → the blocks above with `layout(std140, set=0, binding=N)`;
   samplers get `set`/`binding`; every vertex input, stage varying and fragment
