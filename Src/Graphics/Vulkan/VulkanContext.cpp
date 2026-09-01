@@ -1144,14 +1144,30 @@ void VulkanContext::Draw(VkPipeline pipeline, uint32_t first, uint32_t count)
 
 void VulkanContext::DrawTexturedQuad(const ShaderProgram &program, VkImageView view, VkSampler sampler)
 {
-	if (!m_passOpen || !program.Valid() || view == VK_NULL_HANDLE)
+	DrawTexturedQuad(program, &view, 1, sampler);
+}
+
+void VulkanContext::DrawTexturedQuad(const ShaderProgram &program, const VkImageView *views, uint32_t count, VkSampler sampler)
+{
+	if (!m_passOpen || !program.Valid() || views == nullptr || count == 0)
 		return;
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		if (views[i] == VK_NULL_HANDLE)
+			return;
+	}
 
 	VkDescriptorSet set = AllocateDescriptorSet(program.setLayout);
 	if (set == VK_NULL_HANDLE)
 		return;
 
-	UpdateDescriptorImage(set, 0, view, sampler);
+	// One binding per image, in order: a shader that samples N images declares
+	// them as N bindings, not as one array (which is what R3DShader's texture
+	// banks are and why they go through UpdateDescriptorImages instead).
+	for (uint32_t i = 0; i < count; i++)
+		UpdateDescriptorImage(set, i, views[i], sampler);
+
 	BindDescriptorSet(program.pipelineLayout, set, 0, nullptr);
 	Draw(program.pipeline, 0, 4);
 }

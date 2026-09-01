@@ -37,8 +37,10 @@
 #define NEAR_PLANE 1e-3f
 
 // One line-of-sight readback slot: a D32_SFLOAT depth texel, then an S8_UINT
-// stencil texel, padded so each priority's slot starts 4-byte aligned.
+// stencil texel, padded so each priority's slot starts 4-byte aligned. There is
+// one slot per priority layer, and the Real3D has four of those.
 #define LOS_SLOT_BYTES 8
+#define LOS_PRIORITIES 4
 
 namespace Vul3D {
 
@@ -154,8 +156,7 @@ Result CVul3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned 
 	// R3DFrameBuffers::Draw composites into the AA target if there is one and
 	// the screen otherwise, and a Vulkan pipeline bakes in the render pass it
 	// draws into -- so unlike GL it has to be told which now.
-	if (m_r3dFrameBuffers.CreateFBO(totalXResParam, totalYResParam,
-			m_aaTarget != nullptr ? m_aaTarget : context.Screen()) != Result::OKAY) {
+	if (m_r3dFrameBuffers.CreateFBO(totalXResParam, totalYResParam, m_aaTarget) != Result::OKAY) {
 		return Result::FAIL;
 	}
 
@@ -1753,6 +1754,7 @@ bool CVul3D::ProcessLos(int priority)
 				Vulkan::Image *depth = m_r3dFrameBuffers.GetDepthImage();
 
 				if (depth == nullptr || context.SlotIndex() >= m_losReadback.size() ||
+					priority < 0 || priority >= LOS_PRIORITIES ||
 					losX < 0 || losY < 0 || (uint32_t)losX >= depth->width || (uint32_t)losY >= depth->height) {
 					return false;
 				}
@@ -1785,7 +1787,7 @@ bool CVul3D::CreateLosBuffers()
 	m_losReadback.resize(context.SlotCount());
 
 	for (LosReadback &readback : m_losReadback) {
-		if (!context.CreateBuffer(readback.buffer, LOS_SLOT_BYTES * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		if (!context.CreateBuffer(readback.buffer, LOS_SLOT_BYTES * LOS_PRIORITIES, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
 			ErrorLog("Vul3D: could not create the line-of-sight readback buffers.\n");
 			return false;
@@ -1819,7 +1821,7 @@ void CVul3D::ResolveLos()
 		return;
 	}
 
-	for (int priority = 0; priority < 4; priority++) {
+	for (int priority = 0; priority < LOS_PRIORITIES; priority++) {
 
 		if (!readback.pending[priority]) {
 			continue;

@@ -527,6 +527,28 @@ AUTODEPS := $(patsubst %.o,%.d,$(OBJ_FILES))
 VPATH = $(VPATH_PRIORITY_DIRS) $(INCLUDE_DIRS)
 
 #
+# ...and the gate on it. OBJ_FILES keys on each source's BASENAME, so make
+# resolves "R3DShader.cpp" through VPATH rather than through the full path
+# SRC_FILES already carries -- and when two directories in VPATH hold that
+# basename, the loser is compiled with NO DIAGNOSTIC. That happened (see
+# Src/Graphics/Vul3D/README.md: Vul3D's five mirrors of New3D), and the
+# signature is "the wrong source compiles clean and the link fails three files
+# later", so it gets a check rather than a comment.
+#
+# For every source, what would VPATH actually find for its basename? If that is
+# not the source itself, stop here and say which. Sources that do not exist yet
+# are skipped: Musashi's m68kcpu.c and friends are GENERATED into $(OBJ_DIR)
+# during the build, so on a clean tree they resolve to nothing and would
+# otherwise be reported as a collision on every first build.
+#
+VPATH_RESOLVED = $(foreach file,$(SRC_FILES),$(if $(wildcard $(file)),\
+	$(if $(filter $(file),$(firstword $(wildcard $(addsuffix $(notdir $(file)),$(VPATH))))),,$(file)),))
+
+ifneq ($(strip $(VPATH_RESOLVED)),)
+$(error VPATH would compile a different file for: $(strip $(VPATH_RESOLVED)) -- two directories in VPATH hold that basename. Put the intended one in VPATH_PRIORITY_DIRS.)
+endif
+
+#
 # Compilation rules that both auto-generate the dependency files and compile
 # the source code. This technique is described in the reply by user "rr-" at:
 # https://stackoverflow.com/questions/8025766/makefile-auto-dependency-generation

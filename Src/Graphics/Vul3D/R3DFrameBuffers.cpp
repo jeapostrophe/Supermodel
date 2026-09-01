@@ -1,5 +1,7 @@
 #include "R3DFrameBuffers.h"
 
+#include <iterator>
+
 #include "Shaders/R3DFrameBuffersBase.vert.spv.h"
 #include "Shaders/R3DFrameBuffersBase.frag.spv.h"
 #include "Shaders/R3DFrameBuffersTrans.vert.spv.h"
@@ -16,8 +18,6 @@ R3DFrameBuffers::R3DFrameBuffers()
 	m_dest = nullptr;
 	m_width = 0;
 	m_height = 0;
-
-	m_lastLayer = Layer::none;
 
 	AllocShaderTrans();
 	AllocShaderBase();
@@ -129,12 +129,14 @@ void R3DFrameBuffers::DestroyFBO()
 	m_dest = nullptr;
 	m_width = 0;
 	m_height = 0;
-	m_lastLayer = Layer::none;
 }
 
 void R3DFrameBuffers::BindTexture(Layer layer)
 {
 	// Nothing to bind: Draw() points descriptors at the three colour images.
+	// Unreferenced -- as it is in the GL original, where SuperAA is the only
+	// caller of anything in this class. Mirrored anyway so the two stay the
+	// same class, exactly as Src/Graphics/Vulkan/FBO.h does.
 	(void)layer;
 }
 
@@ -167,8 +169,6 @@ void R3DFrameBuffers::SetFBO(Layer layer)
 		break;
 	}
 	}
-
-	m_lastLayer = layer;
 }
 
 void R3DFrameBuffers::AllocShaderBase()
@@ -235,20 +235,12 @@ void R3DFrameBuffers::DrawAlphaLayer()
 {
 	VulkanContext &context = VulkanContext::Get();
 
-	if (!m_shaderTrans.Valid()) {
-		return;
-	}
+	const VkImageView views[] = {
+		m_target->colour[1].view,		// tex1, what GL bound to texture unit 1
+		m_target->colour[2].view		// tex2, texture unit 2
+	};
 
-	VkDescriptorSet set = context.AllocateDescriptorSet(m_shaderTrans.setLayout);
-	if (set == VK_NULL_HANDLE) {
-		return;
-	}
-
-	context.UpdateDescriptorImage(set, 0, m_target->colour[1].view, context.Sampler(false));	// trans layer 1
-	context.UpdateDescriptorImage(set, 1, m_target->colour[2].view, context.Sampler(false));	// trans layer 2
-	context.BindDescriptorSet(m_shaderTrans.pipelineLayout, set, 0, nullptr);
-
-	context.Draw(m_shaderTrans.pipeline, 0, 4);
+	context.DrawTexturedQuad(m_shaderTrans, views, (uint32_t)std::size(views), context.Sampler(false));
 }
 
 }

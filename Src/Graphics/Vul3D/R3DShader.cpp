@@ -34,11 +34,16 @@ static_assert(offsetof(R3DShader::ViewportBlock, cota)				== VUL3D_STD140_Viewpo
 static_assert(offsetof(R3DShader::ViewportBlock, hardwareStep)		== VUL3D_STD140_ViewportBlock_hardwareStep,		"ViewportBlock.hardwareStep");
 static_assert(offsetof(R3DShader::ViewportBlock, sunClamp)			== VUL3D_STD140_ViewportBlock_sunClamp,			"ViewportBlock.sunClamp");
 static_assert(offsetof(R3DShader::ViewportBlock, intensityClamp)	== VUL3D_STD140_ViewportBlock_intensityClamp,	"ViewportBlock.intensityClamp");
+// ...and that intensityClamp really is the LAST member, which is what catches a
+// member appended to the GLSL: an append moves no existing offset, so every
+// assert above would still pass while this mirror was silently short.
+static_assert(offsetof(R3DShader::ViewportBlock, intensityClamp)	== VUL3D_STD140_ViewportBlock_LASTOFFSET,		"ViewportBlock has a member this mirror does not");
 static_assert(sizeof(R3DShader::ViewportBlock) % 16 == 0, "std140 blocks are a multiple of 16 bytes");
 
 static_assert(offsetof(R3DShader::ModelBlock, modelMat)				== VUL3D_STD140_ModelBlock_modelMat,			"ModelBlock.modelMat");
 static_assert(offsetof(R3DShader::ModelBlock, modelScale)			== VUL3D_STD140_ModelBlock_modelScale,			"ModelBlock.modelScale");
 static_assert(offsetof(R3DShader::ModelBlock, nodeAlpha)			== VUL3D_STD140_ModelBlock_nodeAlpha,			"ModelBlock.nodeAlpha");
+static_assert(offsetof(R3DShader::ModelBlock, nodeAlpha)			== VUL3D_STD140_ModelBlock_LASTOFFSET,			"ModelBlock has a member this mirror does not");
 static_assert(sizeof(R3DShader::ModelBlock) % 16 == 0, "std140 blocks are a multiple of 16 bytes");
 
 static_assert(offsetof(R3DShader::MeshBlock, baseTexInfo)			== VUL3D_STD140_MeshBlock_baseTexInfo,			"MeshBlock.baseTexInfo");
@@ -63,11 +68,17 @@ static_assert(offsetof(R3DShader::MeshBlock, fixedShading)			== VUL3D_STD140_Mes
 static_assert(offsetof(R3DShader::MeshBlock, smoothShading)			== VUL3D_STD140_MeshBlock_smoothShading,		"MeshBlock.smoothShading");
 static_assert(offsetof(R3DShader::MeshBlock, translatorMap)			== VUL3D_STD140_MeshBlock_translatorMap,		"MeshBlock.translatorMap");
 static_assert(offsetof(R3DShader::MeshBlock, polyAlpha)				== VUL3D_STD140_MeshBlock_polyAlpha,			"MeshBlock.polyAlpha");
+static_assert(offsetof(R3DShader::MeshBlock, polyAlpha)				== VUL3D_STD140_MeshBlock_LASTOFFSET,			"MeshBlock has a member this mirror does not");
 static_assert(sizeof(R3DShader::MeshBlock) % 16 == 0, "std140 blocks are a multiple of 16 bytes");
 
 R3DShader::R3DShader(const Util::Config::Node &config)
-	: m_config(config)
 {
+	// New3D kept `config` because LoadShader chose between the triangle and the
+	// quad shader with it. There is only one shader here, so nothing reads it;
+	// the parameter stays so that CVul3D's construction of this member is the
+	// line New3D has.
+	(void)config;
+
 	Start();	// reset attributes
 }
 
@@ -123,13 +134,9 @@ void R3DShader::Start()
 	m_depthCompare	= VK_COMPARE_OP_GREATER_OR_EQUAL;
 }
 
-bool R3DShader::LoadShader(const char* vertexShader, const char* fragmentShader)
+bool R3DShader::LoadShader()
 {
 	VulkanContext &context = VulkanContext::Get();
-
-	if (m_config["QuadRendering"].ValueAs<bool>()) {
-		// see the note at the top of this file; CVul3D logs it once
-	}
 
 	m_program.vertexShader		= VulkanShader::CreateModule(context, R3DShaderTriangles_vert_spv, sizeof(R3DShaderTriangles_vert_spv));
 	m_program.fragmentShader	= VulkanShader::CreateModule(context, R3DShaderTriangles_frag_spv, sizeof(R3DShaderTriangles_frag_spv));
@@ -196,21 +203,21 @@ bool R3DShader::CreatePipelines(Vulkan::RenderTarget* target)
 
 	bool okay = true;
 
-	for (int layer = 0; layer < 3; layer++) {
+	for (size_t layer = 0; layer < PIPELINE_LAYERS; layer++) {
 
 		// R3DFrameBuffers::SetFBO's glDrawBuffers: the colour layer writes all
 		// three attachments, each transparency layer only its own.
-		for (int i = 0; i < 3; i++) {
-			desc.writeMask[i] = (layer == (int)Layer::colour || layer == i) ? rgba : 0;
+		for (size_t i = 0; i < std::size(desc.writeMask); i++) {
+			desc.writeMask[i] = (layer == (size_t)Layer::colour || layer == i) ? rgba : 0;
 		}
 
-		for (int stencil = 0; stencil < 2; stencil++) {
+		for (size_t stencil = 0; stencil < std::size(PIPELINE_STENCIL_MODES); stencil++) {
 
-			desc.stencil = (stencil == 1) ? Vulkan::StencilMode::Layered : Vulkan::StencilMode::Los;
+			desc.stencil = PIPELINE_STENCIL_MODES[stencil];
 
-			for (int compare = 0; compare < 2; compare++) {
+			for (size_t compare = 0; compare < std::size(PIPELINE_DEPTH_COMPARES); compare++) {
 
-				desc.depthCompare = (compare == 1) ? VK_COMPARE_OP_GREATER : VK_COMPARE_OP_GREATER_OR_EQUAL;
+				desc.depthCompare = PIPELINE_DEPTH_COMPARES[compare];
 
 				m_pipelines[layer][stencil][compare] = VulkanShader::CreatePipeline(context, desc);
 				okay = okay && (m_pipelines[layer][stencil][compare] != VK_NULL_HANDLE);
@@ -587,17 +594,37 @@ bool R3DShader::Flush()
 	return true;
 }
 
+/* The index of `value` in `table`, or -1: the inverse of CreatePipelines' loops. */
+template <typename T, size_t N>
+static int IndexIn(const T (&table)[N], T value)
+{
+	for (size_t i = 0; i < N; i++) {
+		if (table[i] == value) {
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
 void R3DShader::Draw(int first, int count)
 {
-	if (!Flush()) {
+	const size_t layer	= (size_t)m_layer;
+	const int stencil	= IndexIn(PIPELINE_STENCIL_MODES, m_stencilMode);
+	const int compare	= IndexIn(PIPELINE_DEPTH_COMPARES, m_depthCompare);
+
+	// A state nothing built a pipeline for would otherwise draw with whichever
+	// one index 0 happens to be, which is a wrong image rather than no image.
+	if (layer >= PIPELINE_LAYERS || stencil < 0 || compare < 0) {
+		static bool reported = false;
+		if (!reported) {
+			reported = true;
+			ErrorLog("Vul3D: no pipeline for layer %d / stencil %d / depth compare %d; those polygons will not be drawn.\n",
+				(int)m_layer, (int)m_stencilMode, (int)m_depthCompare);
+		}
 		return;
 	}
 
-	const int layer		= (int)m_layer;
-	const int stencil	= (m_stencilMode == Vulkan::StencilMode::Layered) ? 1 : 0;
-	const int compare	= (m_depthCompare == VK_COMPARE_OP_GREATER) ? 1 : 0;
-
-	if (layer < 0 || layer > 2) {
+	if (!Flush()) {
 		return;
 	}
 

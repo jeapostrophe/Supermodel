@@ -283,6 +283,20 @@ with `-g -O0` (the `-O` build strips the member names), reads every
 member of each mirror struct against it, and the script errors if two shaders lay
 the same block out differently. Verified red on purpose: inserting one member
 into `R3DBlocks.glsl` fails the build naming `MeshBlock.fogIntensity`.
+Per-member offsets alone would not have covered the likelier edit, though — a
+member APPENDED to a block moves no existing offset, so every assert would still
+pass while the C++ mirror was silently short. So the generator also emits
+`VUL3D_STD140_<Block>_LASTOFFSET`, and each mirror asserts its own last member
+against it. Verified red the same way: appending to `MeshBlock` fails naming
+"MeshBlock has a member this mirror does not".
+
+**Correction — the `VPATH` collision above gets a gate, not just a fix.**
+`Rules.inc` now derives, for every entry of `SRC_FILES`, what `VPATH` would
+actually resolve its basename to, and `$(error)`s naming any that would resolve
+elsewhere. Sources that do not exist at parse time are skipped, because Musashi
+generates `m68kcpu.c` and friends into `$(OBJ_DIR)` during the build. Verified
+both ways: silent on a clean tree, and with `VPATH_PRIORITY_DIRS` emptied it
+names exactly the five Vul3D mirrors.
 
 **Correction — `vec3 lighting[2]` stays a `vec3` array in the GLSL.** std140 pads
 every element of a `vec3` array out to sixteen bytes (measured:

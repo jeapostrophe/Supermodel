@@ -346,6 +346,12 @@ public:
 	 */
 	void	DrawTexturedQuad(const struct ShaderProgram &program, VkImageView view, VkSampler sampler);
 
+	/*
+	 * The same, for a shader whose set binds more than one image -- bindings 0
+	 * to count-1, in order. R3DFrameBuffers' transparency composite samples two.
+	 */
+	void	DrawTexturedQuad(const struct ShaderProgram &program, const VkImageView *views, uint32_t count, VkSampler sampler);
+
 	/* The three dynamic stencil values R3DShader drives per mesh. */
 	void	SetStencil(uint32_t reference, uint32_t compareMask, uint32_t writeMask);
 

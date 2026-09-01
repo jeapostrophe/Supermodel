@@ -19,8 +19,8 @@
  ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
  **/
 
-#ifndef _R3DSCROLLFOG_H_
-#define _R3DSCROLLFOG_H_
+#ifndef INCLUDED_VUL3D_R3DSCROLLFOG_H
+#define INCLUDED_VUL3D_R3DSCROLLFOG_H
 
 #include "Graphics/Vulkan/VulkanContext.h"
 #include "Graphics/Vulkan/VulkanShader.h"

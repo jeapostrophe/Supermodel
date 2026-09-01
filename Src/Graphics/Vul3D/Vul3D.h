@@ -316,13 +316,16 @@ private:
 	// ResolveLos reads that same slot at the top of the next frame that uses it.
 	struct LosReadback
 	{
-		Vulkan::Buffer	buffer;						// 4 priorities x { float depth, uint8 stencil }
-		bool			pending[4] = { false, false, false, false };
+		Vulkan::Buffer	buffer;						// one LOS_SLOT_BYTES slot per priority layer
+		bool			pending[4] = { false, false, false, false };	// LOS_PRIORITIES, which LOS::value[] also spells 4
 	};
 	std::vector<LosReadback> m_losReadback;
 
-	// A whole-sheet texture upload asked for between frames -- CReal3D::LoadState
-	// does exactly that -- which has to wait for a command buffer to record into.
+	// Set when ANY texture upload is asked for between frames, and answered with
+	// a whole-sheet upload, which is a correct superset of every partial one.
+	// CReal3D::LoadState is the caller this exists for: it uploads the whole
+	// sheet from retro_unserialize, where there is no command buffer to record
+	// the copy into.
 	bool m_uploadWholeSheet = false;
 
 	struct

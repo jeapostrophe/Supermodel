@@ -34,7 +34,7 @@ void WriteOutputs(vec4 colour)
 
 	out0 = colour;
 	out1 = blank;
-	out2 = blank;
+	out2 = blank;	
 }
 
 void main()
@@ -42,7 +42,7 @@ void main()
 	// Scroll fog base color
 	lFogColor = fogColour.rgb * fogAmbient;
 
-	// Spotlight on fog (area)
+	// Spotlight on fog (area) 
 	position = spotEllipse.xy;
 	size = spotEllipse.zw;
 	ellipse = length((gl_FragCoord.xy - position) / size);

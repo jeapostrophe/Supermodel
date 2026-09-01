@@ -21,7 +21,9 @@
 
 #include "R3DScrollFog.h"
 
+#include <cstddef>
 #include <cstring>
+#include <iterator>
 
 #include "Supermodel.h"
 #include "Shaders/R3DScrollFog.vert.spv.h"
@@ -41,6 +43,10 @@ namespace Vul3D {
 	static_assert(offsetof(R3DScrollFog::ScrollFogBlock, spotFogColor)	== VUL3D_STD140_ScrollFogBlock_spotFogColor,	"ScrollFogBlock.spotFogColor");
 	static_assert(offsetof(R3DScrollFog::ScrollFogBlock, fogAttenuation)== VUL3D_STD140_ScrollFogBlock_fogAttenuation,	"ScrollFogBlock.fogAttenuation");
 	static_assert(offsetof(R3DScrollFog::ScrollFogBlock, fogAmbient)	== VUL3D_STD140_ScrollFogBlock_fogAmbient,		"ScrollFogBlock.fogAmbient");
+	// ...and that fogAmbient really is the LAST member: an append to the GLSL
+	// moves no existing offset, so without this every assert above would still
+	// pass while this mirror was silently short.
+	static_assert(offsetof(R3DScrollFog::ScrollFogBlock, fogAmbient)	== VUL3D_STD140_ScrollFogBlock_LASTOFFSET,		"ScrollFogBlock has a member this mirror does not");
 	static_assert(sizeof(R3DScrollFog::ScrollFogBlock) % 16 == 0, "std140 blocks are a multiple of 16 bytes");
 
 	R3DScrollFog::R3DScrollFog()
@@ -118,7 +124,7 @@ namespace Vul3D {
 		desc.layout			= m_program.pipelineLayout;
 		desc.renderPass		= target->pass;
 		desc.colourAttachmentCount = (uint32_t)target->colour.size();
-		for (uint32_t i = 0; i < desc.colourAttachmentCount && i < 3; i++) {
+		for (uint32_t i = 0; i < desc.colourAttachmentCount && i < std::size(desc.writeMask); i++) {
 			desc.writeMask[i] = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 		}
 		desc.blend			= false;	// blending is OFF here: CRender2D::DrawSurface disables it before the 3D frame starts, and nothing turns it back on until R3DFrameBuffers::Draw

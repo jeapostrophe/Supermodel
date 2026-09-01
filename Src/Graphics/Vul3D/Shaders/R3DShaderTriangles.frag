@@ -95,7 +95,7 @@ void main()
 			sunFactor = max(sunFactor,0.0);
 		}
 
-		// Total light intensity: sum of all components
+		// Total light intensity: sum of all components 
 		lightIntensity = vec3(sunFactor*lighting[1].x + lighting[1].y);   // diffuse + ambient
 
 		lightIntensity += spotColor*lobeEffect;

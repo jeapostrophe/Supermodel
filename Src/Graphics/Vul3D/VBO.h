@@ -1,5 +1,5 @@
-#ifndef _VBO_H_
-#define _VBO_H_
+#ifndef INCLUDED_VUL3D_VBO_H
+#define INCLUDED_VUL3D_VBO_H
 
 #include "Graphics/Vulkan/VulkanContext.h"
 

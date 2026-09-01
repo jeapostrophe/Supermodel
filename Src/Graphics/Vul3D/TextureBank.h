@@ -1,7 +1,7 @@
 #pragma once
 
-#ifndef _TEXTUREBANK_H_
-#define _TEXTUREBANK_H_
+#ifndef INCLUDED_VUL3D_TEXTUREBANK_H
+#define INCLUDED_VUL3D_TEXTUREBANK_H
 
 #include "Types.h"
 #include "Graphics/Vulkan/VulkanContext.h"

@@ -98,7 +98,16 @@ for dir in $DIRS; do
 							split(key, part, ",")
 							block = substr(part[1], 2)
 							printf "#define VUL3D_STD140_%s_%s %s\n", block, member[key], offset[key]
+							if (offset[key] + 0 > last[block] + 0) { last[block] = offset[key] }
 						}
+					}
+					# The offset of the FINAL member of each block. Assert
+					# the last member of the C++ mirror against it and an
+					# APPEND to the GLSL is caught: an append leaves every
+					# existing offset alone, so the per-member asserts all
+					# still pass while the mirror is silently short.
+					for (block in last) {
+						printf "#define VUL3D_STD140_%s_LASTOFFSET %s\n", block, last[block]
 					}
 				}' >> "$OFFSETS_RAW"
 		fi

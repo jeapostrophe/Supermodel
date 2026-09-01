@@ -6,6 +6,7 @@
 #ifndef INCLUDED_R3DBLOCKOFFSETS_H
 #define INCLUDED_R3DBLOCKOFFSETS_H
 
+#define VUL3D_STD140_MeshBlock_LASTOFFSET 100
 #define VUL3D_STD140_MeshBlock_alphaTest 72
 #define VUL3D_STD140_MeshBlock_baseTexInfo 0
 #define VUL3D_STD140_MeshBlock_baseTexType 28
@@ -28,14 +29,17 @@
 #define VUL3D_STD140_MeshBlock_texturePage 24
 #define VUL3D_STD140_MeshBlock_textureWrapMode 16
 #define VUL3D_STD140_MeshBlock_translatorMap 96
+#define VUL3D_STD140_ModelBlock_LASTOFFSET 68
 #define VUL3D_STD140_ModelBlock_modelMat 0
 #define VUL3D_STD140_ModelBlock_modelScale 64
 #define VUL3D_STD140_ModelBlock_nodeAlpha 68
+#define VUL3D_STD140_ScrollFogBlock_LASTOFFSET 48
 #define VUL3D_STD140_ScrollFogBlock_fogAmbient 48
 #define VUL3D_STD140_ScrollFogBlock_fogAttenuation 44
 #define VUL3D_STD140_ScrollFogBlock_fogColour 0
 #define VUL3D_STD140_ScrollFogBlock_spotEllipse 16
 #define VUL3D_STD140_ScrollFogBlock_spotFogColor 32
+#define VUL3D_STD140_ViewportBlock_LASTOFFSET 196
 #define VUL3D_STD140_ViewportBlock_cota 184
 #define VUL3D_STD140_ViewportBlock_fogAmbient 180
 #define VUL3D_STD140_ViewportBlock_fogAttenuation 176

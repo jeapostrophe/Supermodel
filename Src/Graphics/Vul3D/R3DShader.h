@@ -1,14 +1,25 @@
-#ifndef _R3DSHADER_H_
-#define _R3DSHADER_H_
+#ifndef INCLUDED_VUL3D_R3DSHADER_H
+#define INCLUDED_VUL3D_R3DSHADER_H
 
 #include "Util/NewConfig.h"
 #include "Graphics/New3D/Model.h"
 #include "Graphics/Vulkan/VulkanContext.h"
 #include "Graphics/Vulkan/VulkanShader.h"
 #include <cstdint>
-#include <string>
+#include <iterator>
 
 namespace Vul3D {
+
+/*
+ * glStencilOp and glDepthFunc were loose GL state; under Vulkan each distinct
+ * value New3D sets is a separate pipeline. These three are the ONLY spelling of
+ * that encoding: R3DShader::CreatePipelines loops over them, R3DShader::Draw
+ * indexes back through them, and m_pipelines is sized from them -- so adding a
+ * stencil mode or a compare op is one edit, not three that can drift apart.
+ */
+constexpr Vulkan::StencilMode	PIPELINE_STENCIL_MODES[]	= { Vulkan::StencilMode::Los, Vulkan::StencilMode::Layered };
+constexpr VkCompareOp			PIPELINE_DEPTH_COMPARES[]	= { VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_GREATER };
+constexpr size_t				PIPELINE_LAYERS				= 3;	// Layer::colour, trans1, trans2 -- the three MRT attachments
 
 using New3D::Layer;
 using New3D::Mesh;
@@ -20,7 +31,9 @@ class R3DShader
 public:
 	R3DShader(const Util::Config::Node &config);
 
-	bool	LoadShader			(const char* vertexShader = nullptr, const char* fragmentShader = nullptr);
+	// New3D's two parameters selected an external shader source; there is none
+	// to select here, the SPIR-V is compiled in.
+	bool	LoadShader			();
 	void	UnloadShader		();
 	void	SetMeshUniforms		(const Mesh* m);
 	void	SetModelStates		(const Model* model);
@@ -106,14 +119,11 @@ private:
 	bool	EnsureDescriptorSet	();
 	bool	Flush				();				// append the dirty blocks and rebind the set
 
-	// run-time config
-	const Util::Config::Node &m_config;
-
 	// shader objects
 	Vulkan::ShaderProgram m_program;
 
 	// pipelines, indexed [layer][stencil mode][depth compare]
-	VkPipeline m_pipelines[3][2][2] = {};
+	VkPipeline m_pipelines[PIPELINE_LAYERS][std::size(PIPELINE_STENCIL_MODES)][std::size(PIPELINE_DEPTH_COMPARES)] = {};
 
 	// the CPU side of the three uniform blocks, and whether each needs
 	// re-appending to this frame's uniform ring before the next draw
