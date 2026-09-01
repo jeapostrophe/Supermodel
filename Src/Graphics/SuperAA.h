@@ -1,5 +1,13 @@
 #pragma once
 
+#ifdef SUPERMODEL_VULKAN
+
+// RENDER_BACKEND=vulkan: the Vulkan mirror of this class stands in for it
+// everywhere. See Src/Graphics/Vul3D/README.md.
+#include "Vulkan/SuperAA.h"
+
+#else
+
 #include "Supermodel.h"
 #include "FBO.h"
 #include "New3D/GLSLShader.h"
@@ -33,3 +41,5 @@ private:
 	int m_outputWidth;
 	int m_outputHeight;
 };
+
+#endif	// SUPERMODEL_VULKAN

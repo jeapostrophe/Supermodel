@@ -386,3 +386,9 @@ pkg/
 bin-ios/
 lib-ios/
 obj-ios/
+
+# macOS Vulkan-backend output (built with BITS=-vk so it cannot clobber the
+# OpenGL build's objects, which share their basenames)
+bin-vk/
+lib-vk/
+obj-vk/

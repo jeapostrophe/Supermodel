@@ -1,6 +1,14 @@
 #ifndef _FBO_H_
 #define _FBO_H_
 
+#ifdef SUPERMODEL_VULKAN
+
+// RENDER_BACKEND=vulkan: the Vulkan mirror of this class stands in for it
+// everywhere. See Src/Graphics/Vul3D/README.md.
+#include "Vulkan/FBO.h"
+
+#else
+
 #include <GL/glew.h>
 #include "Supermodel.h"
 
@@ -25,5 +33,7 @@ private:
 	GLuint m_frameBufferID;
 	GLuint m_textureID;
 };
+
+#endif	// SUPERMODEL_VULKAN
 
 #endif

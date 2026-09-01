@@ -13,14 +13,24 @@
 #include <vector>
 #include "../Pkgs/libretro.h"
 #include "Version.h"
+#ifndef SUPERMODEL_VULKAN
 #include <GL/glew.h>
+#endif
 #include "Supermodel.h"
 #include "Util/Format.h"
 #include "Util/ConfigBuilders.h"
 #include "OSD/FileSystemPath.h"
 #include "GameLoader.h"
+#ifdef SUPERMODEL_VULKAN
+#include "Graphics/Vul3D/Vul3D.h"
+#include "Graphics/Vulkan/VulkanContext.h"
+#include "Graphics/Vulkan/VulkanShader.h"
+#include "Graphics/Vulkan/Shaders/PointerOverlay.vert.spv.h"
+#include "Graphics/Vulkan/Shaders/PointerOverlay.frag.spv.h"
+#else
 #include "Graphics/New3D/New3D.h"
 #include "OSD/SDL/Crosshair.h"
+#endif
 #include "Sound/SCSP.h"
 #include "Model3/IEmulator.h"
 #include "Model3/Model3.h"
@@ -333,7 +343,9 @@ static bool baseline_throttle_enabled = true;
 static bool baseline_vsync_enabled = true;
 static int pointer_x = 248;
 static int pointer_y = 192;
+#ifndef SUPERMODEL_VULKAN
 static CCrosshair *s_crosshair = nullptr;
+#endif
 static retro_log_callback s_retro_log_cb = {};
 static retro_log_printf_t s_retro_log_printf = nullptr;
 static retro_perf_callback s_retro_perf_cb = {};
@@ -347,12 +359,16 @@ static retro_perf_counter s_perf_video_submit = { "supermodel.video_submit" };
 static retro_perf_counter s_perf_serialize = { "supermodel.serialize" };
 static retro_perf_counter s_perf_unserialize = { "supermodel.unserialize" };
 
+#ifndef SUPERMODEL_VULKAN
+// GLEW_LIBRETRO resolves every GL >= 1.2 entry point through this. The Vulkan
+// backend has no GLEW and no GL entry points at all; see Rules.inc.
 extern "C" retro_proc_address_t RetroArchGetProcAddress(const GLubyte *name)
 {
   if (hw_render_cb.get_proc_address == nullptr || name == nullptr)
     return nullptr;
   return hw_render_cb.get_proc_address(reinterpret_cast<const char *>(name));
 }
+#endif
 
 struct ThrottleEntry
 {
@@ -380,6 +396,24 @@ struct PointerOverlayVertex
   float y;
 };
 
+#ifdef SUPERMODEL_VULKAN
+// The push-constant block, matching Shaders/PointerOverlay.{vert,frag}: a vec4
+// whose xy is the resolution, then a vec4 colour (std430 offsets 0 and 16).
+struct PointerOverlayPush
+{
+  float resolution[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+  float color[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+};
+
+struct PointerOverlayVulkan
+{
+  Vulkan::ShaderProgram program;
+  Vulkan::Buffer vertices;
+  bool ready = false;
+};
+
+static PointerOverlayVulkan pointer_overlay;
+#else
 struct PointerOverlayGL
 {
   GLuint program = 0;
@@ -391,6 +425,7 @@ struct PointerOverlayGL
 };
 
 static PointerOverlayGL pointer_overlay;
+#endif
 
 static std::string FormatStringV(const char *fmt, va_list args)
 {
@@ -784,6 +819,10 @@ static bool RefreshOutputGeometry(void)
     x_offset = 0;
     y_offset = 0;
   }
+#elif defined(SUPERMODEL_VULKAN)
+  // There is no default framebuffer to query: the core owns the screen target
+  // and tells the frontend its size, rather than the other way round. What
+  // UpdateOutputGeometry just computed IS the geometry.
 #else
       GLint viewport[4] = { 0, 0, 0, 0 };
       glGetIntegerv(GL_VIEWPORT, viewport);
@@ -810,6 +849,7 @@ static bool RefreshOutputGeometry(void)
   return false;
 }
 
+#ifndef SUPERMODEL_VULKAN
 static GLuint CompileOverlayShader(GLenum type, const char *source)
 {
   GLuint shader = glCreateShader(type);
@@ -943,6 +983,68 @@ static void DestroyPointerOverlay(void)
   pointer_overlay.color_loc = -1;
   pointer_overlay.ready = false;
 }
+#endif	// !SUPERMODEL_VULKAN
+
+#ifdef SUPERMODEL_VULKAN
+// The Vulkan pointer overlay: the same 24-vertex triangle list, one pipeline,
+// and the two loose uniforms carried as push constants.
+static const uint32_t POINTER_OVERLAY_VERTICES = 24;
+
+static bool InitializePointerOverlay(void)
+{
+  if (pointer_overlay.ready)
+    return true;
+
+  Vulkan::VulkanContext &context = Vulkan::VulkanContext::Get();
+  if (!context.IsReady() || context.Screen() == nullptr)
+    return false;
+
+  pointer_overlay.program.vertexShader = Vulkan::VulkanShader::CreateModule(context, PointerOverlay_vert_spv, sizeof(PointerOverlay_vert_spv));
+  pointer_overlay.program.fragmentShader = Vulkan::VulkanShader::CreateModule(context, PointerOverlay_frag_spv, sizeof(PointerOverlay_frag_spv));
+  pointer_overlay.program.pipelineLayout = Vulkan::VulkanShader::CreateLayout(context, nullptr, 0, sizeof(PointerOverlayPush),
+    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+
+  Vulkan::PipelineDesc desc;
+  desc.vertexShader = pointer_overlay.program.vertexShader;
+  desc.fragmentShader = pointer_overlay.program.fragmentShader;
+  desc.layout = pointer_overlay.program.pipelineLayout;
+  desc.renderPass = context.Screen()->pass;
+  desc.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  desc.colourAttachmentCount = (uint32_t)context.Screen()->colour.size();
+  desc.vertexStride = sizeof(PointerOverlayVertex);
+  desc.attributes.push_back({ 0, VK_FORMAT_R32G32_SFLOAT, 0 });
+  desc.blend = true;
+  desc.depthTest = false;
+  pointer_overlay.program.pipeline = Vulkan::VulkanShader::CreatePipeline(context, desc);
+  if (!pointer_overlay.program.Valid())
+  {
+    ErrorLog("Pointer overlay: could not create its pipeline.\n");
+    return false;
+  }
+
+  // One run of vertices per frame slot: the CPU writes this buffer every frame
+  // and the GPU may still be reading the previous frame's run out of it.
+  const VkDeviceSize run = POINTER_OVERLAY_VERTICES * sizeof(PointerOverlayVertex);
+  if (!context.CreateBuffer(pointer_overlay.vertices, run * context.SlotCount(),
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+  {
+    ErrorLog("Pointer overlay: could not create its vertex buffer.\n");
+    return false;
+  }
+
+  pointer_overlay.ready = true;
+  return true;
+}
+
+static void DestroyPointerOverlay(void)
+{
+  Vulkan::VulkanContext &context = Vulkan::VulkanContext::Get();
+  context.DestroyBuffer(pointer_overlay.vertices);
+  pointer_overlay.program.Destroy(context);
+  pointer_overlay = PointerOverlayVulkan();
+}
+#endif	// SUPERMODEL_VULKAN
 
 static void AppendRect(std::vector<PointerOverlayVertex> &verts, float left, float top, float right, float bottom)
 {
@@ -986,19 +1088,6 @@ static void DrawPointerOverlay(void)
   if (!pointer_overlay.ready || !ShouldDrawPointerOverlay())
     return;
 
-  GLint saved_viewport[4] = { 0, 0, 0, 0 };
-  GLboolean saved_scissor_enabled = glIsEnabled(GL_SCISSOR_TEST);
-  GLint saved_scissor_box[4] = { 0, 0, 0, 0 };
-  GLboolean saved_blend_enabled = glIsEnabled(GL_BLEND);
-  GLboolean saved_depth_enabled = glIsEnabled(GL_DEPTH_TEST);
-  GLint saved_program = 0;
-  GLint saved_vao = 0;
-  glGetIntegerv(GL_VIEWPORT, saved_viewport);
-  glGetIntegerv(GL_SCISSOR_BOX, saved_scissor_box);
-  glGetIntegerv(GL_CURRENT_PROGRAM, &saved_program);
-  glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &saved_vao);
-
-  glViewport(0, 0, (GLsizei)total_x_res, (GLsizei)total_y_res);
   float norm_x = 0.5f;
   float norm_y = 0.5f;
   if (!GetPointerOverlayCoords(&norm_x, &norm_y))
@@ -1030,6 +1119,61 @@ static void DrawPointerOverlay(void)
   AppendRect(verts, draw_x - outer_thickness, draw_y - outer_length, draw_x + outer_thickness, draw_y + outer_length);
   AppendRect(verts, draw_x - inner_length, draw_y - inner_thickness, draw_x + inner_length, draw_y + inner_thickness);
   AppendRect(verts, draw_x - inner_thickness, draw_y - inner_length, draw_x + inner_thickness, draw_y + inner_length);
+
+#ifdef SUPERMODEL_VULKAN
+
+  Vulkan::VulkanContext &context = Vulkan::VulkanContext::Get();
+  if (!context.FrameOpen() || verts.size() != POINTER_OVERLAY_VERTICES)
+    return;
+
+  const VkDeviceSize run = POINTER_OVERLAY_VERTICES * sizeof(PointerOverlayVertex);
+  const VkDeviceSize offset = run * context.SlotIndex();
+  memcpy((uint8_t *)pointer_overlay.vertices.mapped + offset, verts.data(), (size_t)run);
+
+  // Blending and the disabled depth test are pipeline state on this path, so
+  // only the viewport and scissor have to be said out loud -- and the scissor
+  // is restored afterwards, which is what the GL version's saved state does by
+  // hand.
+  context.BindScreen();
+  context.SetScissorOff();
+  context.SetViewport(0, 0, (int)total_x_res, (int)total_y_res);
+  context.BindVertexBuffer(pointer_overlay.vertices.buffer, offset);
+
+  // The outer cross then the inner one, 12 vertices each -- the two
+  // glUniform4f/glDrawArrays pairs of the GL path.
+  static const float colors[2][4] = {
+    { 0.0f, 0.85f, 1.0f, 0.85f },
+    { 1.0f, 0.15f, 0.85f, 0.95f }
+  };
+
+  PointerOverlayPush push;
+  push.resolution[0] = (float)total_x_res;
+  push.resolution[1] = (float)total_y_res;
+
+  for (uint32_t i = 0; i < 2; i++)
+  {
+    memcpy(push.color, colors[i], sizeof(push.color));
+    context.PushConstants(pointer_overlay.program.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    context.Draw(pointer_overlay.program.pipeline, i * 12, 12);
+  }
+
+  context.SetScissorOn();
+
+#else
+
+  GLint saved_viewport[4] = { 0, 0, 0, 0 };
+  GLboolean saved_scissor_enabled = glIsEnabled(GL_SCISSOR_TEST);
+  GLint saved_scissor_box[4] = { 0, 0, 0, 0 };
+  GLboolean saved_blend_enabled = glIsEnabled(GL_BLEND);
+  GLboolean saved_depth_enabled = glIsEnabled(GL_DEPTH_TEST);
+  GLint saved_program = 0;
+  GLint saved_vao = 0;
+  glGetIntegerv(GL_VIEWPORT, saved_viewport);
+  glGetIntegerv(GL_SCISSOR_BOX, saved_scissor_box);
+  glGetIntegerv(GL_CURRENT_PROGRAM, &saved_program);
+  glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &saved_vao);
+
+  glViewport(0, 0, (GLsizei)total_x_res, (GLsizei)total_y_res);
 
   glDisable(GL_DEPTH_TEST);
   glDisable(GL_SCISSOR_TEST);
@@ -1069,8 +1213,23 @@ static void DrawPointerOverlay(void)
   glScissor(saved_scissor_box[0], saved_scissor_box[1], saved_scissor_box[2], saved_scissor_box[3]);
   glUseProgram((GLuint)saved_program);
   glBindVertexArray((GLuint)saved_vao);
+
+#endif
 }
 
+#ifdef SUPERMODEL_VULKAN
+// CCrosshair is SDL + OpenGL and serves gun games only; it is not built under
+// RENDER_BACKEND=vulkan. The pointer overlay above is separate code and is
+// unaffected.
+static void DestroyCrosshair(void)
+{
+}
+
+static bool InitializeCrosshair(void)
+{
+  return true;
+}
+#else
 static void DestroyCrosshair(void)
 {
   delete s_crosshair;
@@ -1096,6 +1255,7 @@ static bool InitializeCrosshair(void)
   }
   return true;
 }
+#endif
 
 static void ApplyGLGeometry(void)
 {
@@ -1107,16 +1267,36 @@ static void ApplyGLGeometry(void)
   const unsigned internal_total_y_res = total_y_res * (unsigned)supersampling;
   const UINT32 correction = (UINT32)((((double)internal_y_res / 384.0) * 2.0) + 0.5);
 
+#ifdef SUPERMODEL_VULKAN
+  Vulkan::VulkanContext &context = Vulkan::VulkanContext::Get();
+  context.SetViewport(0, 0, (int)internal_x_res, (int)internal_y_res);
+  context.SetScissorOn();       // the glEnable(GL_SCISSOR_TEST) below
+  if (IsWideScreenEnabled())
+    context.SetScissor(0, (int)correction, (int)internal_total_x_res, (int)internal_total_y_res - (int)(correction * 2));
+  else
+    context.SetScissor((int)(internal_x_offset + correction), (int)(internal_y_offset + correction), (int)internal_x_res - (int)(correction * 2), (int)internal_y_res - (int)(correction * 2));
+#else
   glViewport(0, 0, internal_x_res, internal_y_res);
   glEnable(GL_SCISSOR_TEST);
   if (IsWideScreenEnabled())
     glScissor(0, correction, internal_total_x_res, internal_total_y_res - (correction * 2));
   else
     glScissor(internal_x_offset + correction, internal_y_offset + correction, internal_x_res - (correction * 2), internal_y_res - (correction * 2));
+#endif
 }
 
 static void DestroyRenderers(void)
 {
+#ifdef SUPERMODEL_VULKAN
+  // Everything below frees images, buffers and pipelines outright, and this is
+  // reached from retro_run whenever the supersampling or CRT-colour option
+  // changes -- with the previous frame's command buffer very possibly still
+  // executing. GL's driver tracked that for us; Vulkan does not, so go idle
+  // first. (retro_context_destroy waits too; waiting twice costs nothing.)
+  Vulkan::VulkanContext &vulkan = Vulkan::VulkanContext::Get();
+  if (vulkan.IsReady())
+    vulkan.Vk().vkDeviceWaitIdle(vulkan.Device());
+#endif
   DestroyPointerOverlay();
   if (Render3D != nullptr)
   {
@@ -1372,6 +1552,217 @@ static bool ApplyCrosshairOverlayOption(void)
   return changed;
 }
 
+#ifdef SUPERMODEL_VULKAN
+
+static const retro_hw_render_interface_vulkan *s_vulkan_iface = nullptr;
+
+/*
+ * The libretro Vulkan negotiation interface, version 1. retro-trainer declines
+ * GET_HW_RENDER_INTERFACE outright unless a negotiation interface with a device
+ * hook was registered, and RetroArch calls it too, so this is not optional.
+ */
+static const VkApplicationInfo *VulkanGetApplicationInfo(void)
+{
+  static const VkApplicationInfo app_info = {
+    VK_STRUCTURE_TYPE_APPLICATION_INFO,
+    nullptr,
+    "Supermodel",
+    VK_MAKE_VERSION(0, 3, 0),
+    "Supermodel",
+    VK_MAKE_VERSION(0, 3, 0),
+    VK_API_VERSION_1_0
+  };
+  return &app_info;
+}
+
+/*
+ * Picks a physical device and one queue family, and creates the device the
+ * frontend will then own. Every failure returns false rather than aborting:
+ * this runs in an extern "C" frame the ABI expects to be able to fail, and a
+ * false here is the frontend's cue to fall back.
+ */
+static bool VulkanCreateDevice(
+  struct retro_vulkan_context *context,
+  VkInstance instance,
+  VkPhysicalDevice gpu,
+  VkSurfaceKHR surface,
+  PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+  const char **required_device_extensions,
+  unsigned num_required_device_extensions,
+  const char **required_device_layers,
+  unsigned num_required_device_layers,
+  const VkPhysicalDeviceFeatures *required_features)
+{
+  if (context == nullptr || instance == VK_NULL_HANDLE || get_instance_proc_addr == nullptr)
+    return false;
+
+  PFN_vkEnumeratePhysicalDevices enumerate_devices =
+    (PFN_vkEnumeratePhysicalDevices)get_instance_proc_addr(instance, "vkEnumeratePhysicalDevices");
+  PFN_vkGetPhysicalDeviceQueueFamilyProperties get_queue_families =
+    (PFN_vkGetPhysicalDeviceQueueFamilyProperties)get_instance_proc_addr(instance, "vkGetPhysicalDeviceQueueFamilyProperties");
+  PFN_vkCreateDevice create_device =
+    (PFN_vkCreateDevice)get_instance_proc_addr(instance, "vkCreateDevice");
+  PFN_vkDestroyDevice destroy_device =
+    (PFN_vkDestroyDevice)get_instance_proc_addr(instance, "vkDestroyDevice");
+  PFN_vkGetDeviceProcAddr get_device_proc_addr =
+    (PFN_vkGetDeviceProcAddr)get_instance_proc_addr(instance, "vkGetDeviceProcAddr");
+  // Only present when the instance enabled VK_KHR_surface; a null one simply
+  // means presentation cannot be considered, which is the frontend's business.
+  PFN_vkGetPhysicalDeviceSurfaceSupportKHR get_surface_support =
+    (PFN_vkGetPhysicalDeviceSurfaceSupportKHR)get_instance_proc_addr(instance, "vkGetPhysicalDeviceSurfaceSupportKHR");
+
+  if (enumerate_devices == nullptr || get_queue_families == nullptr ||
+      create_device == nullptr || get_device_proc_addr == nullptr)
+  {
+    ErrorLog("Vulkan: the frontend's instance is missing device-creation entry points.\n");
+    return false;
+  }
+
+  if (gpu == VK_NULL_HANDLE)
+  {
+    uint32_t device_count = 0;
+    if (enumerate_devices(instance, &device_count, nullptr) != VK_SUCCESS || device_count == 0)
+    {
+      ErrorLog("Vulkan: no physical device to render on.\n");
+      return false;
+    }
+    std::vector<VkPhysicalDevice> devices(device_count);
+    if (enumerate_devices(instance, &device_count, devices.data()) != VK_SUCCESS)
+      return false;
+
+    for (uint32_t i = 0; i < device_count && gpu == VK_NULL_HANDLE; i++)
+    {
+      uint32_t family_count = 0;
+      get_queue_families(devices[i], &family_count, nullptr);
+      std::vector<VkQueueFamilyProperties> families(family_count);
+      get_queue_families(devices[i], &family_count, families.data());
+      for (uint32_t f = 0; f < family_count; f++)
+      {
+        if (families[f].queueFlags & VK_QUEUE_GRAPHICS_BIT)
+        {
+          gpu = devices[i];
+          break;
+        }
+      }
+    }
+    if (gpu == VK_NULL_HANDLE)
+    {
+      ErrorLog("Vulkan: no physical device has a graphics queue.\n");
+      return false;
+    }
+  }
+
+  uint32_t family_count = 0;
+  get_queue_families(gpu, &family_count, nullptr);
+  std::vector<VkQueueFamilyProperties> families(family_count);
+  get_queue_families(gpu, &family_count, families.data());
+
+  // The interface asks for GRAPHICS and COMPUTE on one family; take that if it
+  // exists and can present, and fall back to graphics-only rather than fail.
+  uint32_t chosen = UINT32_MAX;
+  for (int pass = 0; pass < 2 && chosen == UINT32_MAX; pass++)
+  {
+    const VkQueueFlags wanted = (pass == 0) ? (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT) : VK_QUEUE_GRAPHICS_BIT;
+    for (uint32_t f = 0; f < family_count; f++)
+    {
+      if ((families[f].queueFlags & wanted) != wanted)
+        continue;
+      if (surface != VK_NULL_HANDLE && get_surface_support != nullptr)
+      {
+        VkBool32 presentable = VK_FALSE;
+        if (get_surface_support(gpu, f, surface, &presentable) != VK_SUCCESS || presentable != VK_TRUE)
+          continue;
+      }
+      chosen = f;
+      break;
+    }
+  }
+
+  if (chosen == UINT32_MAX)
+  {
+    ErrorLog("Vulkan: no queue family supports graphics%s.\n", surface != VK_NULL_HANDLE ? " and presentation" : "");
+    return false;
+  }
+
+  const float priority = 1.0f;
+  VkDeviceQueueCreateInfo queue_info = {};
+  queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+  queue_info.queueFamilyIndex = chosen;
+  queue_info.queueCount = 1;
+  queue_info.pQueuePriorities = &priority;
+
+  // Exactly what the frontend asked for, nothing added: it hands in the set its
+  // own renderer needs (on MoltenVK that includes VK_KHR_portability_subset).
+  VkDeviceCreateInfo device_info = {};
+  device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+  device_info.queueCreateInfoCount = 1;
+  device_info.pQueueCreateInfos = &queue_info;
+  device_info.enabledLayerCount = num_required_device_layers;
+  device_info.ppEnabledLayerNames = required_device_layers;
+  device_info.enabledExtensionCount = num_required_device_extensions;
+  device_info.ppEnabledExtensionNames = required_device_extensions;
+  device_info.pEnabledFeatures = required_features;
+
+  VkDevice device = VK_NULL_HANDLE;
+  const VkResult result = create_device(gpu, &device_info, nullptr, &device);
+  if (result != VK_SUCCESS)
+  {
+    ErrorLog("Vulkan: vkCreateDevice failed (%d).\n", (int)result);
+    return false;
+  }
+
+  PFN_vkGetDeviceQueue get_device_queue = (PFN_vkGetDeviceQueue)get_device_proc_addr(device, "vkGetDeviceQueue");
+  if (get_device_queue == nullptr)
+  {
+    ErrorLog("Vulkan: the new device does not provide vkGetDeviceQueue.\n");
+    if (destroy_device != nullptr)
+      destroy_device(device, nullptr);
+    return false;
+  }
+
+  VkQueue queue = VK_NULL_HANDLE;
+  get_device_queue(device, chosen, 0, &queue);
+
+  context->gpu = gpu;
+  context->device = device;
+  context->queue = queue;
+  context->queue_family_index = chosen;
+  // The chosen family can present, so the presentation queue is the same queue.
+  context->presentation_queue = queue;
+  context->presentation_queue_family_index = chosen;
+  return true;
+}
+
+/*
+ * The Vulkan stand-in for InitGLState. There is no default framebuffer and no
+ * viewport to query, so the output size is what the core reports rather than
+ * what it is told, and the "screen" is a render target this core owns.
+ */
+static bool InitVulkanState(void)
+{
+  Vulkan::VulkanContext &context = Vulkan::VulkanContext::Get();
+  if (!context.IsReady())
+    return false;
+
+  UpdateOutputGeometry();
+  output_width = total_x_res;
+  output_height = total_y_res;
+  PushRetroGeometry();
+
+  if (!context.CreateScreen(total_x_res, total_y_res))
+  {
+    ErrorLog("Vulkan: could not create the screen render target.\n");
+    return false;
+  }
+
+  ApplyGLGeometry();
+
+  hw_context_ready = true;
+  return true;
+}
+
+#else	// !SUPERMODEL_VULKAN
+
 static bool InitGLState(void)
 {
   GLenum err;
@@ -1418,10 +1809,42 @@ static bool InitGLState(void)
   return true;
 }
 
+#endif	// SUPERMODEL_VULKAN
+
 static void retro_context_reset(void)
 {
+#ifdef SUPERMODEL_VULKAN
+  retro_hw_render_interface *hw_interface = nullptr;
+  if (!cb_env(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, &hw_interface) || hw_interface == nullptr)
+  {
+    ErrorLog("The frontend provided no Vulkan hardware render interface.\n");
+    return;
+  }
+  if (hw_interface->interface_type != RETRO_HW_RENDER_INTERFACE_VULKAN)
+  {
+    ErrorLog("The frontend's hardware render interface is type %d, not Vulkan.\n", (int)hw_interface->interface_type);
+    return;
+  }
+  if (hw_interface->interface_version < 1)
+  {
+    ErrorLog("The frontend's Vulkan render interface is version %u, which is too old.\n", hw_interface->interface_version);
+    return;
+  }
+  s_vulkan_iface = (const retro_hw_render_interface_vulkan *)hw_interface;
+  // libretro allows context_reset without a preceding context_destroy, and
+  // VulkanContext::Init self-heals by calling Shutdown() -- which would leave
+  // the renderers holding pipelines and images made against the context that
+  // just went away, with renderers_ready still true so InitializeRenderers
+  // below would decline to rebuild them.
+  DestroyRenderers();
+  if (!Vulkan::VulkanContext::Get().Init(s_vulkan_iface))
+    return;
+  if (!InitVulkanState())
+    return;
+#else
   if (!InitGLState())
     return;
+#endif
   if (!InitializeRenderers(false))
     return;
   if (reset_pending && Model3 != nullptr)
@@ -1434,11 +1857,59 @@ static void retro_context_reset(void)
 static void retro_context_destroy(void)
 {
   hw_context_ready = false;
+#ifdef SUPERMODEL_VULKAN
+  Vulkan::VulkanContext &context = Vulkan::VulkanContext::Get();
+  if (context.IsReady())
+    context.Vk().vkDeviceWaitIdle(context.Device());
   DestroyRenderers();
+  // Tears down what this core made and forgets the frontend's device; it never
+  // destroys it.
+  context.Shutdown();
+  s_vulkan_iface = nullptr;
+#else
+  DestroyRenderers();
+#endif
 }
 
 static bool RequestHWContext(void)
 {
+#ifdef SUPERMODEL_VULKAN
+  retro_hw_render_callback hw_render = {};
+  hw_render.context_type = RETRO_HW_CONTEXT_VULKAN;
+  hw_render.context_reset = retro_context_reset;
+  hw_render.context_destroy = retro_context_destroy;
+  hw_render.version_major = VK_API_VERSION_1_0;
+  hw_render.version_minor = 0;
+  hw_render.cache_context = true;
+  hw_render.debug_context = false;
+
+  if (!cb_env(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render))
+  {
+    ErrorLog("The frontend rejected a Vulkan hardware rendering context");
+    return false;
+  }
+  hw_render_cb = hw_render;
+
+  static const struct retro_hw_render_context_negotiation_interface_vulkan negotiation = {
+    RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN,
+    1,                          // v1: create_device, not create_device2
+    VulkanGetApplicationInfo,
+    VulkanCreateDevice,
+    nullptr,                    // destroy_device: this core owns no device resources outside the context
+    nullptr,                    // create_instance (v2 only)
+    nullptr                     // create_device2 (v2 only)
+  };
+  if (!cb_env(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE, (void *)&negotiation))
+  {
+    // Not fatal here: the core is still loaded and the frontend may yet build a
+    // device its own way. What it does mean is that a frontend which requires a
+    // negotiated device (retro-trainer does) will decline
+    // GET_HW_RENDER_INTERFACE, and retro_context_reset will say so with its own
+    // message. Failing the load instead would leave retro_init half-finished.
+    ErrorLog("The frontend rejected the Vulkan context negotiation interface");
+  }
+  return true;
+#else
   unsigned preferred = RETRO_HW_CONTEXT_OPENGL_CORE;
   cb_env(RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER, &preferred);
   if (preferred != RETRO_HW_CONTEXT_OPENGL && preferred != RETRO_HW_CONTEXT_OPENGL_CORE)
@@ -1463,20 +1934,33 @@ static bool RequestHWContext(void)
   }
   hw_render_cb = hw_render;
   return true;
+#endif
 }
 
 static void BindCurrentFramebuffer(void)
 {
+#ifdef SUPERMODEL_VULKAN
+  // The top of the frame: this is where the Vulkan path picks up the sync
+  // index, waits on that slot's fence and opens its command buffer.
+  Vulkan::VulkanContext &context = Vulkan::VulkanContext::Get();
+  if (!context.FrameOpen())
+    context.Begin(total_x_res, total_y_res);
+  context.BindScreen();
+#else
   if (hw_render_cb.get_current_framebuffer != nullptr)
   {
     GLuint framebuffer = (GLuint)hw_render_cb.get_current_framebuffer();
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
   }
+#endif
 }
 
 void BindSupermodelDefaultFramebuffer(void)
 {
+#ifdef SUPERMODEL_VULKAN
+  Vulkan::VulkanContext::Get().BindScreen();
+#else
   if (hw_render_cb.get_current_framebuffer != nullptr)
   {
     GLuint framebuffer = (GLuint)hw_render_cb.get_current_framebuffer();
@@ -1488,6 +1972,7 @@ void BindSupermodelDefaultFramebuffer(void)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDrawBuffer(GL_BACK);
   }
+#endif
 }
 
 static bool InitializeRenderers(bool reset_model)
@@ -1511,7 +1996,11 @@ static bool InitializeRenderers(bool reset_model)
   superAA->SetOutputSize((int)total_x_res, (int)total_y_res);
 
   Render2D = new CRender2D(s_runtime_config);
+#ifdef SUPERMODEL_VULKAN
+  Render3D = new Vul3D::CVul3D(s_runtime_config, Model3->GetGame().name);
+#else
   Render3D = new New3D::CNew3D(s_runtime_config, Model3->GetGame().name);
+#endif
 
   UpscaleMode upscaleMode = (UpscaleMode)s_runtime_config["UpscaleMode"].ValueAs<int>();
   if (Result::OKAY != Render2D->Init(internal_x_offset, internal_y_offset, internal_x_res, internal_y_res, internal_total_x_res, internal_total_y_res, superAA->GetTargetID(), upscaleMode))
@@ -2577,12 +3066,24 @@ RETRO_API void retro_run(void) {
   }
   {
     ScopedPerfCounter perf_video_scope(&s_perf_video_submit);
+#ifndef SUPERMODEL_VULKAN
     if (!frontend_fastforwarding && s_crosshair != nullptr)
       s_crosshair->Update(game.inputs, Inputs, x_offset, y_offset, x_res, y_res);
+#endif
     if (!frontend_fastforwarding && ShouldDrawPointerOverlay())
       DrawPointerOverlay();
+#ifdef SUPERMODEL_VULKAN
+    // Ends the pass, blits the screen into this slot's presentation image
+    // flipped, submits under the frontend's queue lock and calls set_image.
+    // Only a frame that actually reached set_image may be announced as a valid
+    // hardware frame; NULL is libretro's "dupe the last one", which is what a
+    // frame that never got that far honestly is.
+    const bool presented = Vulkan::VulkanContext::Get().End();
+#else
     glFlush();
-    cb_video_refresh(RETRO_HW_FRAME_BUFFER_VALID, total_x_res, total_y_res, 0);
+    const bool presented = true;
+#endif
+    cb_video_refresh(presented ? RETRO_HW_FRAME_BUFFER_VALID : NULL, total_x_res, total_y_res, 0);
   }
 }
 

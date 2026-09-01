@@ -32,6 +32,12 @@
 
 DELETE = rm -d -r -f
 
+#
+# Graphics API. Repeated from Makefiles/Rules.inc (which is included further
+# down) because PLATFORM_GL_LDFLAGS below has to be decided before then.
+#
+RENDER_BACKEND ?= opengl
+
 
 ###############################################################################
 # Release Package Options
@@ -77,14 +83,26 @@ SDL_CFLAGS =
 SDL_LIBS = -framework SDL2 -framework SDL2_net -framework Cocoa
 
 #
-# GL seam (see Makefile.iOS for the other end of it)
+# Render backend seam (see Makefiles/Rules.inc for the definition, and
+# Makefile.iOS for the other end of it)
 #
-# Everything that satisfies the ~48 GL 1.1 entry points GLEW does *not* wrap
-# (GLEW_LIBRETRO resolves GL >= 1.2 through RetroArchGetProcAddress; GL 1.1 is
-# linked directly) plus gluPerspective, which Legacy3D uses. On macOS that is
-# one framework; GLUT is here because Src/OSD/SDL/Main.cpp uses it.
+# RENDER_BACKEND=opengl (the default) links everything that satisfies the ~48
+# GL 1.1 entry points GLEW does *not* wrap (GLEW_LIBRETRO resolves GL >= 1.2
+# through RetroArchGetProcAddress; GL 1.1 is linked directly) plus
+# gluPerspective, which Legacy3D uses. On macOS that is one framework; GLUT is
+# here because Src/OSD/SDL/Main.cpp uses it.
 #
+# RENDER_BACKEND=vulkan links NEITHER -- Src/OSD/SDL/Main.cpp is not built and
+# every Vulkan entry point is fetched through the libretro frontend's
+# get_instance_proc_addr, so the Vulkan build has no graphics library on its
+# link line at all. `nm -u lib-vk/supermodel_libretro.dylib` naming no _gl* and
+# no _vk* symbol is the check that this stayed true.
+#
+ifeq ($(strip $(RENDER_BACKEND)),vulkan)
+PLATFORM_GL_LDFLAGS =
+else
 PLATFORM_GL_LDFLAGS = -framework OpenGL -framework GLUT
+endif
 
 #
 # macOS-specific

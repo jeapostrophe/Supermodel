@@ -101,56 +101,34 @@ HOST_CFLAGS = -c -O2 -w -std=iso9899:2011
 
 
 ###############################################################################
-# GL seam
+# Render backend
 #
-# THIS IS THE ONLY PLACE THE GRAPHICS API IS CHOSEN.
+# RENDER_BACKEND is defined and validated in Makefiles/Rules.inc (opengl |
+# vulkan); this is only where iOS picks its default, which is `vulkan`, because
+# on iOS `opengl` cannot link and cannot run:
 #
-# GLEW is built with -DGLEW_LIBRETRO, so every GL entry point from GL 1.2
-# onwards is a function pointer resolved at run time through
-# RetroArchGetProcAddress -- those cost nothing at link time. What *is* linked
-# directly is the GL 1.1 core (glClear, glDrawArrays, glTexImage2D, ...).
-# Satisfying that set is the ENTIRE GL link dependency of this core, and it is
-# what these two variables supply. Nothing else in the build names a graphics
-# API.
+#   * There is no desktop OpenGL on iOS at all, and iOS's GLES stops at 3.0.
+#   * Measured (Xcode 16 / iPhoneOS18.5 SDK, this source tree) the GL core needs
+#     exactly 27 directly-linked GL entry points -- GLEW_LIBRETRO resolves GL
+#     >= 1.2 through RetroArchGetProcAddress, so what is left is the GL 1.1
+#     core. 25 of the 27 are core GLES 3.0 by name; the 2 that are not are
+#     glClearDepth and glDrawBuffer. Even with -framework OpenGLES the link
+#     therefore fails, and New3D's shaders need source edits to fit GLES on top
+#     of that.
+#   * The station this port exists for (retro-trainer on an iPad) serves
+#     libretro's Vulkan interface through MoltenVK. Vulkan is one render path
+#     that works on iOS and macOS alike.
 #
-# Measured (Xcode 16 / iPhoneOS18.5 SDK, this source tree):
-#   * With the Legacy3D translation units excluded (see EXCLUDE_SRC_FILES) the
-#     core needs exactly 27 directly-linked GL entry points.
-#   * 25 of the 27 are core OpenGL ES 3.0, verified by name against
-#     $(SDK)/System/Library/Frameworks/OpenGLES.framework/Headers/ES3/gl.h.
-#   * The 2 that are not are glClearDepth (New3D::CNew3D::RenderFrame and
-#     retro_context_reset) and glDrawBuffer (3 sites in LibRetro.cpp). Both have
-#     ES 3.0 spellings -- glClearDepthf and glDrawBuffers -- so the remaining
-#     work is a source change, not a linkage question. That change is SM-04's,
-#     not this makefile's, so it is NOT made here and the link is left honest.
-#   * gluPerspective, the one GLU call, is used only by Legacy3D and therefore
-#     disappears with it.
-#
-#   none    (default) -- link with no GL provider at all, which fails with all
-#                        27 names. Nothing is stubbed and nothing is hidden.
-#   eagl              -- the iOS system GLES: -framework OpenGLES. Resolves 25
-#                        of 27; the link then names exactly glClearDepth and
-#                        glDrawBuffer.
-#   angle             -- a vendored ANGLE libGLESv2; set ANGLE_LIB_DIR.
-#
-# SM-04 branch C (New3D ported to Vulkan) removes the seam rather than adding
-# another arm to it.
+# Nothing is linked for the Vulkan backend: every Vulkan entry point is fetched
+# through the frontend's get_instance_proc_addr (see Rules.inc's
+# VK_NO_PROTOTYPES), so PLATFORM_GL_LDFLAGS stays empty. `RENDER_BACKEND=opengl`
+# is still accepted and still fails to link, which is the honest outcome; no arm
+# of this makefile stubs or hides a GL provider.
 ###############################################################################
 
-GL_BACKEND ?= none
+RENDER_BACKEND ?= vulkan
 
-ifeq ($(strip $(GL_BACKEND)),none)
-PLATFORM_GL_CXXFLAGS =
 PLATFORM_GL_LDFLAGS =
-else ifeq ($(strip $(GL_BACKEND)),eagl)
-PLATFORM_GL_CXXFLAGS =
-PLATFORM_GL_LDFLAGS = -framework OpenGLES
-else ifeq ($(strip $(GL_BACKEND)),angle)
-PLATFORM_GL_CXXFLAGS =
-PLATFORM_GL_LDFLAGS = -L$(ANGLE_LIB_DIR) -lGLESv2 -lEGL
-else
-$(error Unknown GL_BACKEND "$(GL_BACKEND)" (expected: none, eagl, angle))
-endif
 
 
 ###############################################################################
@@ -163,7 +141,7 @@ endif
 # Undefined, it asks for <SDL.h> / <SDL_net.h>, which -ISrc/OSD/iOS/include
 # answers with the shims described in Src/OSD/iOS/iOSStubs.cpp.
 #
-PLATFORM_CXXFLAGS = -DSUPERMODEL_IOS -ISrc/OSD/iOS/include $(PLATFORM_GL_CXXFLAGS)
+PLATFORM_CXXFLAGS = -DSUPERMODEL_IOS -ISrc/OSD/iOS/include
 PLATFORM_LDFLAGS = $(PLATFORM_ARCH) $(PLATFORM_GL_LDFLAGS) -lz -lm -lc++ \
 	-Wl,-rpath,@executable_path/Frameworks -Wl,-rpath,@loader_path
 PLATFORM_DIRS =

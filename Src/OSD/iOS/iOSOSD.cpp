@@ -57,7 +57,9 @@
 #include "Supermodel.h"
 #include "OSD/Audio.h"
 #include "OSD/Video.h"
+#ifndef SUPERMODEL_VULKAN
 #include "OSD/SDL/Crosshair.h"
+#endif
 
 /******************************************************************************
  OSD/Video.h
@@ -85,7 +87,14 @@ void SetAudioCallback(AudioCallbackFPtr newCallback, void *newData)
 
 /******************************************************************************
  OSD/SDL/Crosshair.h
+
+ Only under RENDER_BACKEND=opengl. The Vulkan backend compiles the crosshair out
+ of Src/OSD/SDL/LibRetro.cpp entirely, so nothing names CCrosshair -- and
+ defining it here would drag Crosshair.h's #include of New3D.h, and with it GLEW,
+ into a build that has neither.
 ******************************************************************************/
+
+#ifndef SUPERMODEL_VULKAN
 
 CCrosshair::CCrosshair(const Util::Config::Node &config)
   : m_config(config),
@@ -114,3 +123,5 @@ void CCrosshair::Update(uint32_t currentInputs, CInputs *inputs, unsigned int xO
   (void)xRes;
   (void)yRes;
 }
+
+#endif	// !SUPERMODEL_VULKAN

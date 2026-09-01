@@ -65,6 +65,43 @@ ifeq ($(strip $(LIBRETRO)),1)
 	SUPERMODEL_BUILD_FLAGS += -DGLEW_LIBRETRO
 endif
 
+#
+# RENDER_BACKEND: the graphics API the renderers are built against.
+#
+#   opengl  (default) -- the historical path: GLEW, Src/Graphics/{Shader,FBO,
+#                        Render2D,SuperAA}.cpp and Src/Graphics/New3D.
+#   vulkan            -- Src/Graphics/Vulkan (the foundation + the 2D layer,
+#                        SuperAA and FBO mirrored onto it) and Src/Graphics/Vul3D
+#                        (the Real3D renderer). See Src/Graphics/Vul3D/README.md.
+#
+# The two are mutually exclusive and chosen at build time: `vulkan` defines
+# SUPERMODEL_VULKAN, which is what the two-line switches at the top of
+# Src/Graphics/{Render2D,SuperAA,FBO}.h and the branches in
+# Src/OSD/SDL/LibRetro.cpp key off.
+#
+# NOTHING LINKS A VULKAN LIBRARY. Every entry point is fetched through the
+# libretro frontend's get_instance_proc_addr, which is why VK_NO_PROTOTYPES is
+# defined project-wide here: the vendored Khronos headers in Src/Pkgs/vulkan
+# then declare types and no functions, so a stray direct call does not compile
+# -- rather than compiling and quietly acquiring a dependency on a loader.
+#
+# The Vulkan path only exists inside the libretro core: it renders into an image
+# it hands to the frontend, and there is no window, no swapchain and no SDL
+# desktop UI on it. A non-libretro build therefore errors out rather than
+# producing a binary with no way to show a frame.
+#
+RENDER_BACKEND ?= opengl
+
+ifeq ($(strip $(RENDER_BACKEND)),vulkan)
+	ifneq ($(strip $(LIBRETRO)),1)
+$(error RENDER_BACKEND=vulkan builds the libretro core only. Pass LIBRETRO=1.)
+	endif
+	SUPERMODEL_BUILD_FLAGS += -DSUPERMODEL_VULKAN
+	SUPERMODEL_BUILD_FLAGS += -DVK_NO_PROTOTYPES
+else ifneq ($(strip $(RENDER_BACKEND)),opengl)
+$(error Unknown RENDER_BACKEND "$(RENDER_BACKEND)" (expected: opengl, vulkan))
+endif
+
 # DEBUG will build a debug build but does *not* enable extra debug logging and
 # therefore does not modify SUPERMODEL_BUILD_FLAGS
 
@@ -236,6 +273,60 @@ ifeq ($(strip $(LIBRETRO)),1)
 endif
 
 #
+# RENDER_BACKEND=vulkan: swap the graphics translation units.
+#
+# Everything removed here either calls OpenGL directly or exists only to serve
+# the SDL desktop UI, which stays OpenGL (Main.cpp, Gui.cpp, imgui). Removing
+# Main.cpp/Audio.cpp takes BeginFrameVideo, EndFrameVideo and SetAudioCallback
+# with them -- exactly the set Src/OSD/iOS/iOSOSD.cpp was written to supply --
+# so it is added here if the platform has not already added it.
+#
+# Kept from Src/Graphics/New3D: Mat4, Model, PolyHeader, Vec and R3DFloat, which
+# contain no GL and which Src/Graphics/Vul3D reuses by #include.
+#
+ifeq ($(strip $(RENDER_BACKEND)),vulkan)
+	EXCLUDE_SRC_FILES += \
+		Src/Pkgs/glew.c \
+		Src/Graphics/Shader.cpp \
+		Src/Graphics/FBO.cpp \
+		Src/Graphics/Render2D.cpp \
+		Src/Graphics/SuperAA.cpp \
+		Src/Graphics/New3D/GLSLShader.cpp \
+		Src/Graphics/New3D/New3D.cpp \
+		Src/Graphics/New3D/R3DShader.cpp \
+		Src/Graphics/New3D/R3DFrameBuffers.cpp \
+		Src/Graphics/New3D/R3DScrollFog.cpp \
+		Src/Graphics/New3D/TextureBank.cpp \
+		Src/Graphics/New3D/VBO.cpp \
+		Src/Graphics/Legacy3D/Error.cpp \
+		Src/Graphics/Legacy3D/Legacy3D.cpp \
+		Src/Graphics/Legacy3D/Models.cpp \
+		Src/Graphics/Legacy3D/TextureRefs.cpp \
+		Src/OSD/SDL/Main.cpp \
+		Src/OSD/SDL/Audio.cpp \
+		Src/OSD/SDL/Gui.cpp \
+		Src/OSD/SDL/Crosshair.cpp \
+		Src/Pkgs/imgui/imgui.cpp \
+		Src/Pkgs/imgui/imgui_draw.cpp \
+		Src/Pkgs/imgui/imgui_impl_sdl2.cpp \
+		Src/Pkgs/imgui/imgui_impl_opengl3.cpp \
+		Src/Pkgs/imgui/imgui_tables.cpp \
+		Src/Pkgs/imgui/imgui_widgets.cpp
+
+	SRC_FILES += \
+		Src/Graphics/Vulkan/VulkanContext.cpp \
+		Src/Graphics/Vulkan/VulkanShader.cpp \
+		Src/Graphics/Vulkan/FBO.cpp \
+		Src/Graphics/Vulkan/Render2D.cpp \
+		Src/Graphics/Vulkan/SuperAA.cpp \
+		Src/Graphics/Vul3D/Vul3D.cpp
+
+	ifeq (,$(filter Src/OSD/iOS/iOSOSD.cpp,$(SRC_FILES)))
+		SRC_FILES += Src/OSD/iOS/iOSOSD.cpp
+	endif
+endif
+
+#
 # Per-platform source exclusions.
 #
 # A platform makefile may set EXCLUDE_SRC_FILES to drop translation units that
@@ -253,6 +344,12 @@ OBJ_FILES = $(foreach file,$(SRC_FILES),$(OBJ_DIR)/$(basename $(notdir $(file)))
 #
 # Deduce include directories from the source file list. The sort function
 # removes duplicates and is used to construct a set.
+#
+# This is also VPATH, and OBJ_FILES keys on each source's BASENAME -- so a
+# directory here that holds a same-named source shadows the one in SRC_FILES.
+# Do NOT add Src/Graphics/ back under RENDER_BACKEND=vulkan: it would make
+# "Render2D.cpp" resolve to the excluded GL file rather than to
+# Src/Graphics/Vulkan/Render2D.cpp, with no diagnostic.
 #
 INCLUDE_DIRS = $(sort $(foreach file,$(SRC_FILES),$(dir	$(file))))
 

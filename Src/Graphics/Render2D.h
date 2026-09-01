@@ -28,6 +28,14 @@
 #ifndef INCLUDED_RENDER2D_H
 #define INCLUDED_RENDER2D_H
 
+#ifdef SUPERMODEL_VULKAN
+
+// RENDER_BACKEND=vulkan: the Vulkan mirror of this class stands in for it
+// everywhere. See Src/Graphics/Vul3D/README.md.
+#include "Vulkan/Render2D.h"
+
+#else
+
 #include <GL/glew.h>
 #include <memory>
 #include "Supermodel.h"
@@ -211,5 +219,7 @@ private:
 	std::shared_ptr<TileGenBuffer> m_drawBuffers[2];
 };
 
+
+#endif  // SUPERMODEL_VULKAN
 
 #endif  // INCLUDED_RENDER2D_H
