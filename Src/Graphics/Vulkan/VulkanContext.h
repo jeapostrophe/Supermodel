@@ -386,6 +386,14 @@ public:
 	/* glUniform*: copy a block into this frame's uniform ring and bind by dynamic offset. */
 	UniformSlice	AppendUniforms(const void *data, size_t size);
 
+	/*
+	 * The buffer AppendUniforms slices out of, for a descriptor set that binds
+	 * a block by dynamic offset: the set names the buffer, and only the offset
+	 * changes per draw. A slice that comes back naming a DIFFERENT buffer
+	 * overflowed into a dedicated one and is not reachable through that set.
+	 */
+	VkBuffer		UniformRingBuffer() const;
+
 	// ----------------------------------------------------------- descriptors --
 
 	VkDescriptorSetLayout	CreateDescriptorSetLayout(const DescriptorBinding *bindings, size_t count);

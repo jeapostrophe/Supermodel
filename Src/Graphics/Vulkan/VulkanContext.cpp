@@ -28,7 +28,16 @@
 namespace Vulkan {
 
 static const VkDeviceSize	STAGING_RING_BYTES	= 8u * 1024u * 1024u;
-static const VkDeviceSize	UNIFORM_RING_BYTES	= 1u * 1024u * 1024u;
+/*
+ * The uniform ring has to hold every block appended in one frame, because a
+ * request that does not fit gets a VkBuffer of its own -- correct, but the 3D
+ * renderer binds its blocks through a descriptor set that names THIS buffer, so
+ * for R3DShader an overflow means a skipped draw. A mesh costs up to three
+ * appends, each rounded up to minUniformBufferOffsetAlignment (256 bytes on
+ * MoltenVK), and a busy scene draws a few thousand meshes across its twelve
+ * passes -- so 16 MB, not 1.
+ */
+static const VkDeviceSize	UNIFORM_RING_BYTES	= 16u * 1024u * 1024u;
 static const uint32_t		DESCRIPTOR_SETS_PER_FRAME = 1024;
 
 VulkanContext &VulkanContext::Get()
@@ -1325,6 +1334,13 @@ UniformSlice VulkanContext::AppendUniforms(const void *data, size_t size)
 	slice.offset	= (uint32_t)offset;
 	slice.valid		= true;
 	return slice;
+}
+
+VkBuffer VulkanContext::UniformRingBuffer() const
+{
+	if (!m_frameOpen)
+		return VK_NULL_HANDLE;
+	return m_slots[m_slot].uniforms.buffer.buffer;
 }
 
 /******************************************************************************
