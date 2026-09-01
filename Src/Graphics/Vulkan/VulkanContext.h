@@ -443,7 +443,14 @@ private:
 	bool	CreateSlots();
 	void	DestroySlots();
 	void	DestroyScreen();
-	bool	RingAppend(Ring &ring, const void *data, VkDeviceSize size, VkDeviceSize alignment, VkBuffer *buffer, VkDeviceSize *offset);
+	/*
+	 * allowOversized: whether a request too big for the ring may have a buffer
+	 * of its own. True for staging (a copy names whatever buffer it is given);
+	 * FALSE for uniforms, because a descriptor set binds a block by dynamic
+	 * offset into a buffer the set names, and a dedicated one is unreachable
+	 * through it.
+	 */
+	bool	RingAppend(Ring &ring, const void *data, VkDeviceSize size, VkDeviceSize alignment, VkBuffer *buffer, VkDeviceSize *offset, bool allowOversized);
 	void	EmitDynamicState();
 	void	EmitStencil();
 
@@ -474,6 +481,7 @@ private:
 	VkRect2D		m_scissor		= {};
 	VkRect2D		m_savedScissor	= {};
 	bool			m_scissorOff	= true;
+	bool			m_uniformRingExhausted = false;	// said once per frame, not once per lost draw
 	uint32_t		m_stencilRef	= 0;
 	uint32_t		m_stencilCompareMask = 0xFF;
 	uint32_t		m_stencilWriteMask	 = 0xFF;

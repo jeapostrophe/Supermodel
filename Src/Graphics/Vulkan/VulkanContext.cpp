@@ -215,7 +215,9 @@ bool VulkanContext::CreateSlots()
 
 		VkDescriptorPoolSize sizes[2] = {};
 		sizes[0].type			= VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-		sizes[0].descriptorCount = DESCRIPTOR_SETS_PER_FRAME;
+		// R3DShader's set binds THREE of these, so a per-set count would cap the
+		// pool at a third of maxSets and turn a busy frame into skipped draws.
+		sizes[0].descriptorCount = DESCRIPTOR_SETS_PER_FRAME * 3;
 		sizes[1].type			= VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		sizes[1].descriptorCount = DESCRIPTOR_SETS_PER_FRAME * 4;
 
@@ -846,6 +848,7 @@ bool VulkanContext::Begin(uint32_t width, uint32_t height)
 	m_vk.vkResetDescriptorPool(m_device, slot.descriptors, 0);
 	slot.staging.head	= 0;
 	slot.uniforms.head	= 0;
+	m_uniformRingExhausted = false;
 	for (Buffer &buffer : slot.oversized)
 		DestroyBuffer(buffer);
 	slot.oversized.clear();
@@ -1115,24 +1118,30 @@ void VulkanContext::ClearAttachments(bool colour, bool depth, bool stencil, cons
 
 void VulkanContext::BindVertexBuffer(VkBuffer buffer, VkDeviceSize offset)
 {
-	if (!m_passOpen || buffer == VK_NULL_HANDLE)
+	// vkCmdBindVertexBuffers is renderpass="both" in Khronos' vk.xml, so this
+	// needs only a command buffer. Requiring an open pass would have made a
+	// caller that binds between passes fail silently.
+	if (!m_frameOpen || buffer == VK_NULL_HANDLE)
 		return;
 	m_vk.vkCmdBindVertexBuffers(Cmd(), 0, 1, &buffer, &offset);
 }
 
 void VulkanContext::BindDescriptorSet(VkPipelineLayout layout, VkDescriptorSet set, uint32_t dynamicCount, const uint32_t *dynamicOffsets)
 {
-	if (!m_passOpen || set == VK_NULL_HANDLE)
+	// vkCmdBindDescriptorSets is renderpass="both" too; see BindVertexBuffer.
+	if (!m_frameOpen || set == VK_NULL_HANDLE)
 		return;
 	m_vk.vkCmdBindDescriptorSets(Cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, dynamicCount, dynamicOffsets);
 }
 
 void VulkanContext::Draw(VkPipeline pipeline, uint32_t first, uint32_t count)
 {
-	if (!m_passOpen || count == 0)
+	// A null pipeline used to fall through to vkCmdDraw with whatever was bound
+	// before -- or with nothing at all, right after BindTarget cleared it.
+	if (!m_passOpen || count == 0 || pipeline == VK_NULL_HANDLE)
 		return;
 
-	if (pipeline != VK_NULL_HANDLE && pipeline != m_boundPipeline)
+	if (pipeline != m_boundPipeline)
 	{
 		m_vk.vkCmdBindPipeline(Cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 		m_boundPipeline = pipeline;
@@ -1183,7 +1192,7 @@ void VulkanContext::PushConstants(VkPipelineLayout layout, VkShaderStageFlags st
  Uploads, copies and readback
 ******************************************************************************/
 
-bool VulkanContext::RingAppend(Ring &ring, const void *data, VkDeviceSize size, VkDeviceSize alignment, VkBuffer *buffer, VkDeviceSize *offset)
+bool VulkanContext::RingAppend(Ring &ring, const void *data, VkDeviceSize size, VkDeviceSize alignment, VkBuffer *buffer, VkDeviceSize *offset, bool allowOversized)
 {
 	if (size == 0)
 		return false;
@@ -1205,7 +1214,16 @@ bool VulkanContext::RingAppend(Ring &ring, const void *data, VkDeviceSize size, 
 	 * Too big for the ring (a full RAM vertex upload is ~19 MB against an 8 MB
 	 * ring). Give this one request a buffer of its own; it is freed the next
 	 * time this slot comes round, which is after its fence has signalled.
+	 *
+	 * Not an option for the uniform ring: once it is full EVERY later append
+	 * would take this path, so one exhausted frame would mean thousands of
+	 * device allocations -- and each one is a buffer the bound descriptor set
+	 * cannot address anyway, so the draw is lost either way. Refusing is both
+	 * cheaper and the same outcome.
 	 */
+	if (!allowOversized)
+		return false;
+
 	FrameSlot &slot = m_slots[m_slot];
 	slot.oversized.emplace_back();
 	Buffer &dedicated = slot.oversized.back();
@@ -1229,7 +1247,7 @@ void VulkanContext::UploadImage(Image &image, uint32_t level, int32_t x, int32_t
 
 	VkBuffer		staging	= VK_NULL_HANDLE;
 	VkDeviceSize	offset	= 0;
-	if (!RingAppend(m_slots[m_slot].staging, src, (VkDeviceSize)srcBytes, 16, &staging, &offset))
+	if (!RingAppend(m_slots[m_slot].staging, src, (VkDeviceSize)srcBytes, 16, &staging, &offset, true))
 	{
 		ErrorLog("Vulkan: could not stage %zu bytes for a texture upload.\n", srcBytes);
 		return;
@@ -1260,7 +1278,7 @@ void VulkanContext::UploadBuffer(Buffer &buffer, VkDeviceSize offset, VkDeviceSi
 
 	VkBuffer		staging			= VK_NULL_HANDLE;
 	VkDeviceSize	stagingOffset	= 0;
-	if (!RingAppend(m_slots[m_slot].staging, src, size, 16, &staging, &stagingOffset))
+	if (!RingAppend(m_slots[m_slot].staging, src, size, 16, &staging, &stagingOffset, true))
 	{
 		ErrorLog("Vulkan: could not stage %llu bytes for a buffer upload.\n", (unsigned long long)size);
 		return;
@@ -1327,6 +1345,22 @@ void VulkanContext::ReadbackToBuffer(Image &image, VkImageAspectFlags aspect, in
 
 	m_vk.vkCmdCopyImageToBuffer(Cmd(), image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.buffer, 1, &copy);
 
+	/*
+	 * Waiting on the frame's fence proves the copy has EXECUTED; it does not
+	 * make what it wrote visible to the host. HOST_COHERENT removes the need to
+	 * invalidate the mapping, not the need for this dependency -- so without it
+	 * CVul3D::ResolveLos may read a stale line-of-sight value, and a gun game
+	 * decides "hit geometry" or "hit sky" from it.
+	 */
+	VkMemoryBarrier barrier = {};
+	barrier.sType			= VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	barrier.srcAccessMask	= VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask	= VK_ACCESS_HOST_READ_BIT;
+
+	m_vk.vkCmdPipelineBarrier(Cmd(),
+		VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+		0, 1, &barrier, 0, nullptr, 0, nullptr);
+
 	if (was != VK_IMAGE_LAYOUT_UNDEFINED)
 		TransitionImage(image, was);
 }
@@ -1343,8 +1377,18 @@ UniformSlice VulkanContext::AppendUniforms(const void *data, size_t size)
 
 	VkBuffer		buffer	= VK_NULL_HANDLE;
 	VkDeviceSize	offset	= 0;
-	if (!RingAppend(m_slots[m_slot].uniforms, data, (VkDeviceSize)size, alignment, &buffer, &offset))
+	if (!RingAppend(m_slots[m_slot].uniforms, data, (VkDeviceSize)size, alignment, &buffer, &offset, false))
+	{
+		// Said once: a frame that exhausts the ring loses every draw after this
+		// point, so a message per draw would be thousands of lines about one
+		// event. UNIFORM_RING_BYTES is the number to raise.
+		if (!m_uniformRingExhausted)
+		{
+			m_uniformRingExhausted = true;
+			ErrorLog("Vulkan: this frame's uniform ring is exhausted; the rest of its geometry will not be drawn.\n");
+		}
 		return slice;
+	}
 
 	slice.buffer	= buffer;
 	slice.offset	= (uint32_t)offset;

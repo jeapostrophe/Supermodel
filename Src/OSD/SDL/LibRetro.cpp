@@ -1691,8 +1691,36 @@ static bool VulkanCreateDevice(
   queue_info.queueCount = 1;
   queue_info.pQueuePriorities = &priority;
 
-  // Exactly what the frontend asked for, nothing added: it hands in the set its
-  // own renderer needs (on MoltenVK that includes VK_KHR_portability_subset).
+  /*
+   * The frontend's feature set plus the ONE feature this core cannot render
+   * without: Vul3D's fragment shader indexes `usampler2D textureBank[2]` by the
+   * texturePage uniform, and Vulkan 1.0 allows a non-constant (if dynamically
+   * uniform) index into a sampled-image array only when
+   * shaderSampledImageArrayDynamicIndexing is enabled. Without it the shader is
+   * an invalid use of the API -- which MoltenVK is likely to run anyway, so the
+   * symptom would be a validation error here and wrong texels somewhere else.
+   *
+   * If the physical device does not support it, say so and carry on: the device
+   * is still worth having for the 2D layer, and refusing to create it would
+   * turn a bad picture into no picture at all.
+   */
+  VkPhysicalDeviceFeatures features = {};
+  if (required_features != nullptr)
+    features = *required_features;
+
+  PFN_vkGetPhysicalDeviceFeatures get_features =
+    (PFN_vkGetPhysicalDeviceFeatures)get_instance_proc_addr(instance, "vkGetPhysicalDeviceFeatures");
+  VkPhysicalDeviceFeatures supported = {};
+  if (get_features != nullptr)
+    get_features(gpu, &supported);
+
+  if (get_features == nullptr || supported.shaderSampledImageArrayDynamicIndexing == VK_TRUE)
+    features.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
+  else
+    ErrorLog("Vulkan: this device does not support shaderSampledImageArrayDynamicIndexing; 3D textures may be wrong.\n");
+
+  // Everything else is exactly what the frontend asked for: it hands in the set
+  // its own renderer needs (on MoltenVK that includes VK_KHR_portability_subset).
   VkDeviceCreateInfo device_info = {};
   device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
   device_info.queueCreateInfoCount = 1;
@@ -1701,7 +1729,7 @@ static bool VulkanCreateDevice(
   device_info.ppEnabledLayerNames = required_device_layers;
   device_info.enabledExtensionCount = num_required_device_extensions;
   device_info.ppEnabledExtensionNames = required_device_extensions;
-  device_info.pEnabledFeatures = required_features;
+  device_info.pEnabledFeatures = &features;
 
   VkDevice device = VK_NULL_HANDLE;
   const VkResult result = create_device(gpu, &device_info, nullptr, &device);

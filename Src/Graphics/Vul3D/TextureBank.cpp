@@ -47,7 +47,13 @@ void Vul3D::TextureBank::AttachMemory(const UINT16* textureRam)
 
 VkImageView Vul3D::TextureBank::Bind()
 {
-	// There is no bind point: R3DShader points a descriptor at this view.
+	// There is no bind point: R3DShader points a descriptor at this view. What
+	// binding still has to do is the layout: a bank that has never been
+	// uploaded to is still VK_IMAGE_LAYOUT_UNDEFINED, and R3DShader's
+	// descriptor claims SHADER_READ_ONLY_OPTIMAL -- which is every frame before
+	// the game's first texture DMA, and every frame after a context reset. This
+	// is a no-op once an upload has left it in that layout.
+	Vulkan::VulkanContext::Get().TransitionImage(m_texture, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	return m_texture.view;
 }
 

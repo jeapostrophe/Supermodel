@@ -99,7 +99,13 @@ void CRender2D::PreRenderFrame(void)
 	VulkanContext &context = VulkanContext::Get();
 
 	for (int i = 0; i < 2; i++) {
-		if (!m_drawBuffers[i]) continue;		// we don't have a draw buffer yet
+		if (!m_drawBuffers[i]) {
+			// No draw buffer yet -- but DrawSurface will sample this texture
+			// anyway, and its descriptor claims SHADER_READ_ONLY_OPTIMAL while
+			// an image nothing has uploaded to is still UNDEFINED.
+			context.TransitionImage(m_textures[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+			continue;
+		}
 		context.UploadImage(m_textures[i], 0, 0, 0, SURFACE_WIDTH, SURFACE_HEIGHT, SURFACE_ROW_TEXELS,
 			m_drawBuffers[i]->data, sizeof(m_drawBuffers[i]->data));
 	}

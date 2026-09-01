@@ -255,7 +255,16 @@ void R3DShader::SetShader(bool enable)
 	if (enable) {
 		// glUseProgram's Vulkan half is binding a pipeline, which happens per
 		// draw; what is left of it here is the state reset.
-		m_set = VK_NULL_HANDLE;		// this frame's descriptor pool was reset under us
+		/*
+		 * Drop the set. This is LOAD-BEARING, not tidiness: VulkanContext::Begin
+		 * resets the frame slot's descriptor pool, and with a single frame slot
+		 * the uniform ring's VkBuffer handle is IDENTICAL from frame to frame --
+		 * so EnsureDescriptorSet's `m_setBuffer == ring` test would happily
+		 * reuse a set the pool has already freed. SetRenderStates calls this
+		 * once per pass rather than once per frame, which is more often than
+		 * strictly needed and cheaper than tracking the frame.
+		 */
+		m_set = VK_NULL_HANDLE;
 		Start();
 		DiscardAlpha(false);	// need some default
 	}

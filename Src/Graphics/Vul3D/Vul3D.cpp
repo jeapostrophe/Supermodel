@@ -151,8 +151,6 @@ Result CVul3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned 
 
 	m_r3dFrameBuffers.DestroyFBO();		// remove any old ones if created
 
-	VulkanContext &context = VulkanContext::Get();
-
 	// R3DFrameBuffers::Draw composites into the AA target if there is one and
 	// the screen otherwise, and a Vulkan pipeline bakes in the render pass it
 	// draws into -- so unlike GL it has to be told which now.

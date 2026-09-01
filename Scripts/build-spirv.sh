@@ -56,7 +56,7 @@ OFFSETS_RAW=$(mktemp -t vul3d-std140.XXXXXX)
 
 # set -e aborts mid-shader on a glslc failure, so sweep the in-progress file up
 # on the way out rather than leaving it beside the header it did not replace.
-trap 'rm -f "$ROOT"/Src/Graphics/Vulkan/Shaders/*.spv.h.tmp "$ROOT"/Src/Graphics/Vul3D/Shaders/*.spv.h.tmp "$OFFSETS_HEADER.tmp" "$OFFSETS_RAW" "$OFFSETS_RAW.spv"' EXIT
+trap 'rm -f "$ROOT"/Src/Graphics/Vulkan/Shaders/*.spv.h.tmp "$ROOT"/Src/Graphics/Vul3D/Shaders/*.spv.h.tmp "$OFFSETS_HEADER.tmp" "$OFFSETS_RAW" "$OFFSETS_RAW.spv" "$OFFSETS_RAW.dis"' EXIT
 
 count=0
 for dir in $DIRS; do
@@ -84,12 +84,24 @@ for dir in $DIRS; do
 			echo ""
 			echo "#endif	// INCLUDED_${guard}_SPV_H"
 		} > "$out.tmp"
-		mv "$out.tmp" "$out"
+		# NOT moved into place yet: see the commit phase at the bottom. A run
+		# that aborts half way would otherwise leave new SPIR-V beside an old
+		# R3DBlockOffsets.h, and the std140 asserts -- which compare the C++
+		# mirror against that header, not against the SPIR-V -- would all pass
+		# while the shaders had moved under them.
 
 		# The std140 offsets, out of an unoptimised build of the same source.
+		#
+		# spirv-dis goes to a file rather than a pipe on purpose. In a pipeline
+		# `set -e` sees only awk, which exits 0 on empty input -- so a spirv-dis
+		# failure on the .vert would contribute no defines and be masked
+		# completely by the .frag, which declares the same three blocks. The
+		# cross-stage agreement this whole step exists to check would disappear
+		# with every assert still green.
 		if [ "$dir" = "$ROOT/Src/Graphics/Vul3D/Shaders" ]; then
 			"$GLSLC" --target-env=vulkan1.0 -g -O0 -I "$dir" -o "$OFFSETS_RAW.spv" "$source"
-			"$SPIRV_DIS" "$OFFSETS_RAW.spv" | awk '
+			"$SPIRV_DIS" "$OFFSETS_RAW.spv" > "$OFFSETS_RAW.dis"
+			awk '
 				$1 == "OpMemberName" { name = $4; gsub("\"", "", name); member[$2 "," $3] = name }
 				$1 == "OpMemberDecorate" && $4 == "Offset" { offset[$2 "," $3] = $5 }
 				END {
@@ -109,7 +121,7 @@ for dir in $DIRS; do
 					for (block in last) {
 						printf "#define VUL3D_STD140_%s_LASTOFFSET %s\n", block, last[block]
 					}
-				}' >> "$OFFSETS_RAW"
+				}' "$OFFSETS_RAW.dis" >> "$OFFSETS_RAW"
 		fi
 
 		echo "  $base -> $(basename "$out")"
@@ -136,6 +148,15 @@ done
 	echo "#endif	// INCLUDED_R3DBLOCKOFFSETS_H"
 } > "$OFFSETS_HEADER.tmp"
 
+# A read-back that found nothing would write a header of pure guard, and every
+# static_assert would then fail on an undefined macro -- loud, but only at the
+# next compile. Say it here, where the cause is.
+found=$(sort -u "$OFFSETS_RAW" | wc -l | tr -d ' ')
+if [ "$found" -lt 40 ]; then
+	echo "build-spirv.sh: only $found std140 offsets read back; expected the four blocks' worth." >&2
+	exit 1
+fi
+
 duplicates=$(sort -u "$OFFSETS_RAW" | awk '{ print $2 }' | sort | uniq -d)
 if [ -n "$duplicates" ]; then
 	echo "build-spirv.sh: these block members have two different std140 offsets:" >&2
@@ -143,7 +164,18 @@ if [ -n "$duplicates" ]; then
 	exit 1
 fi
 
+#
+# Commit phase: every check has passed, so the SPIR-V headers and the offsets
+# they are asserted against go into place together.
+#
+for dir in $DIRS; do
+	[ -d "$dir" ] || continue
+	for staged in "$dir"/*.spv.h.tmp; do
+		[ -e "$staged" ] || continue
+		mv "$staged" "${staged%.tmp}"
+	done
+done
 mv "$OFFSETS_HEADER.tmp" "$OFFSETS_HEADER"
-echo "  std140 offsets -> $(basename "$OFFSETS_HEADER") ($(sort -u "$OFFSETS_RAW" | wc -l | tr -d ' ') members)"
+echo "  std140 offsets -> $(basename "$OFFSETS_HEADER") ($found members)"
 
 echo "build-spirv.sh: $count shader(s) compiled."

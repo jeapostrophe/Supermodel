@@ -231,18 +231,27 @@ ends and back when bound as a target; keep that bookkeeping inside
 `RenderTarget`/`BindTarget` so renderers never see a barrier.
 
 The *screen* target mirrors libretro's GL default framebuffer: one colour
-attachment + D32S8, sized `total_x_res × total_y_res` (times supersampling when
-SuperAA is on, exactly as the GL path does through `SuperAA::GetTargetID`).
+attachment + D32S8, sized `total_x_res × total_y_res`. **Correction — it is NOT
+supersampled.** `InitVulkanState` and `Begin` both pass the un-supersampled
+size; the supersampled target is SuperAA's own `FBO`, at
+`total_x_res × aa`, and everything draws into that instead when it exists
+(`SuperAA::GetTargetID`), exactly as the GL path does.
 
 Memory: one `VkDeviceMemory` per image/buffer (there are ~15 objects total);
 a `FindMemoryType(typeBits, flags)` helper; staging and uniform rings are
 `HOST_VISIBLE | HOST_COHERENT`, persistently mapped, one per frame slot.
 
-Descriptors: one `VkDescriptorPool` per frame slot, reset in `Begin()`. Sets are
-allocated per (pipeline layout, bound images) and cached for the frame. Uniform
+Descriptors: one `VkDescriptorPool` per frame slot, reset in `Begin()`. Uniform
 blocks are `UNIFORM_BUFFER_DYNAMIC`; the dynamic offset is passed at bind time
 so a per-draw change of a block costs an `Append` and a
 `vkCmdBindDescriptorSets` with new offsets, not a new set.
+**Correction — only `R3DShader` caches a set.** It does so in
+`EnsureDescriptorSet`, keyed on the frame's uniform ring and the two
+texture-bank views, and `SetShader` drops it because the pool reset frees it
+while the ring's `VkBuffer` handle stays the same from frame to frame. Everyone
+else — `DrawTexturedQuad`, `R3DScrollFog::DrawScrollFog` — allocates a fresh set
+per draw, which is a handful per frame. The pool's `UNIFORM_BUFFER_DYNAMIC`
+count is `maxSets * 3`, because R3DShader's one set binds three of them.
 
 Function loading: `VulkanContext` holds every `PFN_vk*` it uses, fetched with
 `get_instance_proc_addr` (instance-level) and `vkGetDeviceProcAddr`
@@ -345,10 +354,16 @@ blocks: glslang lays a block `bool` out as a 32-bit value, so the whole
   `EnsureDescriptorSet` allocates a fresh one whenever the frame's uniform ring
   or a texture-bank view changes under it — about eight per frame — and the
   per-draw cost stays an `Append` plus a rebind with three dynamic offsets.
-  **Correction — the uniform ring is 16 MB, not 1.** `AppendUniforms` falls back
-  to a dedicated buffer for a request that does not fit, which is fine for a
-  texture upload but not here: R3DShader binds its blocks through a set that
-  names the *ring*, so an overflow is a skipped draw. A mesh costs up to three
+  **Correction — the uniform ring is 16 MB, and exhausting it now REFUSES
+  rather than falling back.** A request that does not fit used to get a buffer
+  of its own, which is right for a texture upload and wrong here: R3DShader
+  binds its blocks through a set that names the *ring*, so the draw is lost
+  either way — and because `RingAppend` does not advance the head on that path,
+  *every* later append in the frame would take it too, turning one exhausted
+  frame into thousands of `vkCreateBuffer`/`vkAllocateMemory` pairs against
+  MoltenVK's low `maxMemoryAllocationCount`. `AppendUniforms` now says so once
+  and returns an invalid slice, so an under-sized ring costs lost geometry and
+  one log line rather than an allocation storm. Sizing: a mesh costs up to three
   appends, each rounded up to `minUniformBufferOffsetAlignment` (256 bytes on
   MoltenVK), across twelve passes.
 - **`R3DFrameBuffers`** — one `RenderTarget` with three colour attachments +
@@ -381,10 +396,37 @@ blocks: glslang lays a block `bool` out as a 32-bit value, so the whole
   (`VkImage` mips halve exactly as New3D's loop allocates). `UploadTextures`
   copies the sub-rectangle from texture RAM through the staging ring in one
   `vkCmdCopyBufferToImage` (`bufferRowLength = width` after packing rows, or
-  2048 if the staging copy keeps the source stride). Sampler: nearest, repeat
-  (only `texelFetch` is used, so filtering never matters). Both banks share one
+  2048 if the staging copy keeps the source stride). Both banks share one
   descriptor binding as `usampler2D textureBank[2]`; indexing by the
-  `texturePage` uniform is legal in Vulkan GLSL (dynamically uniform).
+  `texturePage` uniform is dynamically uniform, which is the GLSL half of what
+  makes it legal.
+  **Correction — the sampler clamps to edge, it does not repeat.**
+  `VulkanContext::Init` builds both of its samplers with
+  `VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE`. It never matters — only `texelFetch`
+  is used, so neither the filter nor the address mode is consulted — but the
+  brief said "repeat" and the code does not.
+  **Correction — dynamic indexing also needs a device FEATURE, and it has to be
+  asked for.** Vulkan 1.0 permits a non-constant index into a sampled-image
+  array only when `VkPhysicalDeviceFeatures::shaderSampledImageArrayDynamicIndexing`
+  was enabled at `vkCreateDevice`. The core builds the device
+  (`VulkanCreateDevice` in `LibRetro.cpp`) and was passing the frontend's
+  feature struct through verbatim, so the one feature only the core knows it
+  needs was never requested: a validation error at pipeline creation under the
+  `WGPU_VALIDATION=1` recipe below, and wrong texels on every textured polygon
+  wherever it is enforced. MoltenVK is likely to run it regardless, which is
+  what makes it a trap rather than a crash. It is now ORed into a copy of the
+  struct after checking `vkGetPhysicalDeviceFeatures`; a device that lacks it
+  gets a log line rather than a refusal, because the 2D layer is still worth
+  having.
+  **Correction — a bank that has never been uploaded to is still
+  `VK_IMAGE_LAYOUT_UNDEFINED`.** Nothing but `UploadImage` transitions it, and
+  `R3DShader`'s descriptor claims `SHADER_READ_ONLY_OPTIMAL` — so every frame
+  before the game's first texture DMA, and every frame after a context reset
+  rebuilds the banks, was a layout mismatch. `TextureBank::Bind` now does the
+  transition, which is a no-op once an upload has left the image in that layout.
+  The 2D layer had the same shape (`CRender2D::PreRenderFrame` skips the upload
+  while a tile-gen draw buffer is null, and `DrawSurface` samples the texture
+  anyway) and is fixed the same way.
   **Correction — the copy carries the source stride; the rows are not packed.**
   `bufferRowLength = 2048`, which is the texture-RAM width GL walked one row at a
   time (a `glTexSubImage2D` per row) rather than set `GL_UNPACK_ROW_LENGTH` for.
@@ -413,6 +455,13 @@ blocks: glslang lays a block `bool` out as a 32-bit value, so the whole
   exactly, because the CPU only ever reads the *front* buffer that was written
   during the previous frame. The value computation (`zVal = depth / NEAR_PLANE`,
   stencil bit 7 into the mantissa LSB) is copied verbatim. No mid-frame stall.
+  **Correction — a fence wait does not make the copy visible to the host.**
+  `ReadbackToBuffer` ends with a `VkMemoryBarrier` from `TRANSFER_WRITE` to
+  `HOST_READ` at `PIPELINE_STAGE_HOST_BIT`. `HOST_COHERENT` removes the need to
+  *invalidate* the mapping; it does not remove the need for the dependency, and
+  the image barrier the layout transition emits carries neither `HOST_READ` nor
+  the host stage. Without it `ResolveLos` may read a stale value, and a gun game
+  decides "hit geometry" or "hit sky" from it.
   **Correction — the buffer is per frame SLOT, and with more than one slot the
   value is that many frames old.** What `VulkanContext::Begin` guarantees is that
   *this slot's* fence has signalled, not the previous frame's — so the readback
