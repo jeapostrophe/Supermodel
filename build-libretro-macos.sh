@@ -12,18 +12,33 @@
 #     (its own dir), so both frameworks must sit next to it in lib/. They live
 #     in Frameworks/; we symlink them into lib/ if missing.
 #
-# Usage:  ./build-libretro-macos.sh        (from the repo root)
-# Output: lib/supermodel_libretro.dylib
+# Usage:  ./build-libretro-macos.sh                          (OpenGL, lib/)
+#         RENDER_BACKEND=vulkan ./build-libretro-macos.sh    (Vulkan, lib-vk/)
+# Output: lib/supermodel_libretro.dylib or lib-vk/supermodel_libretro.dylib
+#
+# The Vulkan core (Src/Graphics/Vul3D/README.md) builds into its own object
+# and library directories via BITS=-vk so the two backends never clobber each
+# other's objects. It still links SDL2/SDL2_net on macOS -- threads and the
+# netboard go through SDL there -- so it needs the same framework symlinks.
 
 cd "$(dirname "$0")"
 
+RENDER_BACKEND="${RENDER_BACKEND:-opengl}"
+case "$RENDER_BACKEND" in
+  opengl) BITS= ;;
+  vulkan) BITS=-vk ;;
+  *) echo "unknown RENDER_BACKEND '$RENDER_BACKEND' (opengl|vulkan)" >&2; exit 1 ;;
+esac
+LIB="lib$BITS"
+mkdir -p "$LIB"
+
 # SDL frameworks next to the dylib for runtime @loader_path resolution.
-[ -e lib/SDL2.framework ]     || ln -sfn ../Frameworks/SDL2.framework     lib/SDL2.framework
-[ -e lib/SDL2_net.framework ] || ln -sfn ../Frameworks/SDL2_net.framework lib/SDL2_net.framework
+[ -e "$LIB/SDL2.framework" ]     || ln -sfn ../Frameworks/SDL2.framework     "$LIB/SDL2.framework"
+[ -e "$LIB/SDL2_net.framework" ] || ln -sfn ../Frameworks/SDL2_net.framework "$LIB/SDL2_net.framework"
 
-make -f Makefiles/Makefile.OSX LIBRETRO=1 \
+make -f Makefiles/Makefile.OSX LIBRETRO=1 RENDER_BACKEND="$RENDER_BACKEND" BITS="$BITS" \
      CC=/usr/bin/clang CXX=/usr/bin/clang LD=/usr/bin/clang \
-     lib/supermodel_libretro.dylib -j"$(sysctl -n hw.ncpu)"
+     "$LIB/supermodel_libretro.dylib" -j"$(sysctl -n hw.ncpu)"
 
-echo "Built: $(cd "$(dirname "$0")" && pwd)/lib/supermodel_libretro.dylib"
-file lib/supermodel_libretro.dylib
+echo "Built: $(pwd)/$LIB/supermodel_libretro.dylib"
+file "$LIB/supermodel_libretro.dylib"

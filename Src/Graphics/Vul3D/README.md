@@ -558,3 +558,21 @@ Run through retro-trainer on the Mac (`./make.sh spikeofe` in retro-trainer with
 the core symlinked into `config/cores/`), which drives MoltenVK — the same layer
 the iPad uses — with `WGPU_VALIDATION=1` turning on the Khronos validation
 layer.
+
+**The macOS Vulkan core still links SDL2 and SDL2_net** (threads and the
+netboard go through SDL on macOS; only iOS uses the pthread shim in
+`Src/OSD/iOS/`), so the two frameworks must sit beside the dylib for
+`@loader_path` resolution — `build-libretro-macos.sh` makes the symlinks in
+`lib-vk/` when run with `RENDER_BACKEND=vulkan`. A missing symlink shows up as
+`dlopen … Library not loaded: @rpath/SDL2.framework` in the frontend, before the
+core says anything.
+
+**Measured 2026-09-01 on an M4 Max, retro-trainer + MoltenVK, validation on:**
+the core negotiates a device (`Vulkan: Apple M4 Max (API 1.3.334), queue family
+0`, `sync index mask 0x1, 1 frame slots`), builds the screen target and one
+presentation image at 496×384, and runs `spikeofe` with **no validation
+message from the core** — the two that remain in that log
+(`VUID-vkAcquireNextImageKHR-fence-10066`, `VUID-StandaloneSpirv-None-10684`)
+fire before the core is loaded and come from the frontend's own swapchain and
+shaders. One core message was found and fixed in that run: a view on the
+transfer-only depth-copy image (`VUID-VkImageViewCreateInfo-image-04441`).
