@@ -1557,7 +1557,7 @@ static bool ApplyCrosshairOverlayOption(void)
 static const retro_hw_render_interface_vulkan *s_vulkan_iface = nullptr;
 
 /*
- * The libretro Vulkan negotiation interface, version 1. retro-trainer declines
+ * The libretro Vulkan negotiation interface, version 2. retro-trainer declines
  * GET_HW_RENDER_INTERFACE outright unless a negotiation interface with a device
  * hook was registered, and RetroArch calls it too, so this is not optional.
  */
@@ -1580,8 +1580,19 @@ static const VkApplicationInfo *VulkanGetApplicationInfo(void)
  * frontend will then own. Every failure returns false rather than aborting:
  * this runs in an extern "C" frame the ABI expects to be able to fail, and a
  * false here is the frontend's cue to fall back.
+ *
+ * The body of both negotiation entry points. When create_device_wrapper is
+ * non-null this is the v2 call and the device is built through the frontend's
+ * wrapper (libretro_vulkan.h: "Rather than call vkCreateDevice directly, a core
+ * must call the CreateDevice wrapper provided"); when it is null this is the v1
+ * call and the device is built with vkCreateDevice. v2 passes no required
+ * extensions, layers or features -- the frontend merges its own into the create
+ * info inside the wrapper -- so those arguments are simply empty there. The one
+ * thing that is NOT empty under v2 is pEnabledFeatures: it still carries this
+ * core's own shaderSampledImageArrayDynamicIndexing, so a frontend that adds a
+ * VkPhysicalDeviceFeatures2 of its own must fold this flat struct into it.
  */
-static bool VulkanCreateDevice(
+static bool VulkanCreateDeviceCommon(
   struct retro_vulkan_context *context,
   VkInstance instance,
   VkPhysicalDevice gpu,
@@ -1591,7 +1602,9 @@ static bool VulkanCreateDevice(
   unsigned num_required_device_extensions,
   const char **required_device_layers,
   unsigned num_required_device_layers,
-  const VkPhysicalDeviceFeatures *required_features)
+  const VkPhysicalDeviceFeatures *required_features,
+  retro_vulkan_create_device_wrapper_t create_device_wrapper,
+  void *opaque)
 {
   if (context == nullptr || instance == VK_NULL_HANDLE || get_instance_proc_addr == nullptr)
     return false;
@@ -1612,7 +1625,8 @@ static bool VulkanCreateDevice(
     (PFN_vkGetPhysicalDeviceSurfaceSupportKHR)get_instance_proc_addr(instance, "vkGetPhysicalDeviceSurfaceSupportKHR");
 
   if (enumerate_devices == nullptr || get_queue_families == nullptr ||
-      create_device == nullptr || get_device_proc_addr == nullptr)
+      get_device_proc_addr == nullptr ||
+      (create_device_wrapper == nullptr && create_device == nullptr))
   {
     ErrorLog("Vulkan: the frontend's instance is missing device-creation entry points.\n");
     return false;
@@ -1719,8 +1733,10 @@ static bool VulkanCreateDevice(
   else
     ErrorLog("Vulkan: this device does not support shaderSampledImageArrayDynamicIndexing; 3D textures may be wrong.\n");
 
-  // Everything else is exactly what the frontend asked for: it hands in the set
-  // its own renderer needs (on MoltenVK that includes VK_KHR_portability_subset).
+  // Everything else is exactly what the frontend asked for. Under v1 it hands in
+  // the set its own renderer needs (on MoltenVK that includes
+  // VK_KHR_portability_subset); under v2 these are empty and the frontend merges
+  // that same set in inside the wrapper below.
   VkDeviceCreateInfo device_info = {};
   device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
   device_info.queueCreateInfoCount = 1;
@@ -1732,18 +1748,35 @@ static bool VulkanCreateDevice(
   device_info.pEnabledFeatures = &features;
 
   VkDevice device = VK_NULL_HANDLE;
-  const VkResult result = create_device(gpu, &device_info, nullptr, &device);
-  if (result != VK_SUCCESS)
+  if (create_device_wrapper != nullptr)
   {
-    ErrorLog("Vulkan: vkCreateDevice failed (%d).\n", (int)result);
-    return false;
+    // v2: the frontend adds the extensions, layers and pNext features it needs
+    // of its own and calls vkCreateDevice itself. VK_NULL_HANDLE is its failure.
+    device = create_device_wrapper(gpu, opaque, &device_info);
+    if (device == VK_NULL_HANDLE)
+    {
+      ErrorLog("Vulkan: the frontend's create_device wrapper failed.\n");
+      return false;
+    }
+  }
+  else
+  {
+    const VkResult result = create_device(gpu, &device_info, nullptr, &device);
+    if (result != VK_SUCCESS)
+    {
+      ErrorLog("Vulkan: vkCreateDevice failed (%d).\n", (int)result);
+      return false;
+    }
   }
 
   PFN_vkGetDeviceQueue get_device_queue = (PFN_vkGetDeviceQueue)get_device_proc_addr(device, "vkGetDeviceQueue");
   if (get_device_queue == nullptr)
   {
     ErrorLog("Vulkan: the new device does not provide vkGetDeviceQueue.\n");
-    if (destroy_device != nullptr)
+    // Only the v1 device is ours to destroy: a v2 device came out of the
+    // frontend's wrapper and "Device provided to frontend is owned by the
+    // frontend", which will destroy it when we return false.
+    if (create_device_wrapper == nullptr && destroy_device != nullptr)
       destroy_device(device, nullptr);
     return false;
   }
@@ -1759,6 +1792,54 @@ static bool VulkanCreateDevice(
   context->presentation_queue = queue;
   context->presentation_queue_family_index = chosen;
   return true;
+}
+
+/*
+ * The v1 entry point, kept for frontends that do not recognize v2. It creates
+ * the device with vkCreateDevice, so a v2 frontend which wants to own the
+ * create info never reaches it -- create_device2 takes precedence there.
+ */
+static bool VulkanCreateDevice(
+  struct retro_vulkan_context *context,
+  VkInstance instance,
+  VkPhysicalDevice gpu,
+  VkSurfaceKHR surface,
+  PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+  const char **required_device_extensions,
+  unsigned num_required_device_extensions,
+  const char **required_device_layers,
+  unsigned num_required_device_layers,
+  const VkPhysicalDeviceFeatures *required_features)
+{
+  return VulkanCreateDeviceCommon(
+    context, instance, gpu, surface, get_instance_proc_addr,
+    required_device_extensions, num_required_device_extensions,
+    required_device_layers, num_required_device_layers, required_features,
+    nullptr, nullptr);
+}
+
+/*
+ * The v2 entry point. It does exactly what the v1 one does except that the
+ * device is created through the wrapper the frontend hands in, which lets the
+ * frontend add the extensions and PDF2 features it needs to the create info --
+ * and lets a frontend that shares this device (retro-trainer imports the core's
+ * images rather than reading them back) know that it built it.
+ */
+static bool VulkanCreateDevice2(
+  struct retro_vulkan_context *context,
+  VkInstance instance,
+  VkPhysicalDevice gpu,
+  VkSurfaceKHR surface,
+  PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+  retro_vulkan_create_device_wrapper_t create_device_wrapper,
+  void *opaque)
+{
+  if (create_device_wrapper == nullptr)
+    return false;
+  return VulkanCreateDeviceCommon(
+    context, instance, gpu, surface, get_instance_proc_addr,
+    nullptr, 0, nullptr, 0, nullptr,
+    create_device_wrapper, opaque);
 }
 
 /*
@@ -1920,12 +2001,17 @@ static bool RequestHWContext(void)
 
   static const struct retro_hw_render_context_negotiation_interface_vulkan negotiation = {
     RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN,
-    1,                          // v1: create_device, not create_device2
+    // v2. A frontend that only knows v1 must not reject this -- libretro.h:
+    // "A frontend must not reject a negotiation interface version that is larger
+    // than what the frontend supports. Instead, the frontend will use the older
+    // entry points that it recognizes." -- and VulkanCreateDevice is still here
+    // for it.
+    RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN_VERSION,
     VulkanGetApplicationInfo,
     VulkanCreateDevice,
     nullptr,                    // destroy_device: this core owns no device resources outside the context
-    nullptr,                    // create_instance (v2 only)
-    nullptr                     // create_device2 (v2 only)
+    nullptr,                    // create_instance: the frontend's instance is fine as it is
+    VulkanCreateDevice2
   };
   if (!cb_env(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE, (void *)&negotiation))
   {

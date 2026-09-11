@@ -176,22 +176,44 @@ pointer overlay, `InitializeRenderers` (`new Vul3D::CVul3D`), `retro_run`'s
 
 - `RequestHWContext`: `context_type = RETRO_HW_CONTEXT_VULKAN`,
   `version_major = VK_API_VERSION_1_0`, `cache_context = true`, then register a
-  `retro_hw_render_context_negotiation_interface_vulkan` **version 1** with
-  `VulkanGetApplicationInfo` and `VulkanCreateDevice` (`destroy_device` null).
+  `retro_hw_render_context_negotiation_interface_vulkan` **version 2** with
+  `VulkanGetApplicationInfo`, `VulkanCreateDevice` and `VulkanCreateDevice2`
+  (`destroy_device` and `create_instance` null). A frontend that only knows v1
+  must not reject the higher version -- it uses the entry points it recognizes,
+  which is why `VulkanCreateDevice` stays.
   retro-trainer declines `GET_HW_RENDER_INTERFACE` unless a negotiation
   interface with a device hook was registered, and RetroArch also calls it, so
   it is not optional. A frontend that rejects the negotiation interface is not
   fatal here -- the core is loaded, and `retro_context_reset` says so with its
   own message rather than leaving `retro_init` half finished.
-- `VulkanCreateDevice` (v1 signature in `libretro_vulkan.h`): pick `gpu` if
+- `VulkanCreateDeviceCommon`, the body both entry points share: pick `gpu` if
   given, else the first physical device with a graphics queue; choose a queue
   family with `VK_QUEUE_GRAPHICS_BIT` (preferring one that also has
   `VK_QUEUE_COMPUTE_BIT`) that can also present to `surface` when a surface is
   passed; enable exactly the `required_device_extensions`, layers and
-  `required_features` handed in (retro-trainer hands in wgpu's set, which
-  includes `VK_KHR_portability_subset` on MoltenVK); fill every field of
+  `required_features` handed in (under v1 retro-trainer hands in wgpu's set,
+  which includes `VK_KHR_portability_subset` on MoltenVK); fill every field of
   `retro_vulkan_context` (presentation queue = the same queue). Return `false`
   rather than abort on any failure.
+
+  The one difference between the two is how the device is built.
+  `VulkanCreateDevice` (v1) calls `vkCreateDevice` resolved through the
+  frontend's `get_instance_proc_addr`. `VulkanCreateDevice2` (v2) instead calls
+  the `create_device_wrapper` the frontend hands in -- the header requires it:
+  "Rather than call vkCreateDevice directly, a core must call the CreateDevice
+  wrapper provided" -- which is what lets the frontend merge its own extensions
+  and `pNext` features into this core's `VkDeviceCreateInfo`. v2 passes no
+  required extensions, layers or features at all, so `ppEnabledExtensionNames`
+  and `ppEnabledLayerNames` are empty there and the merge is entirely the
+  frontend's. `pEnabledFeatures` is the exception: it is never empty, because
+  the core always puts its own `shaderSampledImageArrayDynamicIndexing` in it
+  (below), so a frontend that wants a `VkPhysicalDeviceFeatures2` of its own in
+  the `pNext` chain has to fold that flat struct into it rather than set both --
+  Vulkan permits only one of the two -- which is what retro-trainer's wrapper
+  does. It also lets a frontend that
+  wants to *share* the device know it built it: retro-trainer adopts the
+  resulting `VkDevice` for wgpu and imports the core's images instead of reading
+  each frame back (`PLAN LAT-03`, `LAT-08`).
 
   One feature is added to the frontend's set rather than passed through:
   `shaderSampledImageArrayDynamicIndexing`. Vulkan 1.0 permits a non-constant
@@ -416,7 +438,7 @@ from `vkGetDeviceProcAddr`. No global function pointers, no `volk`.
   loop. Both banks share one descriptor binding as `usampler2D textureBank[2]`;
   indexing by the `texturePage` uniform is dynamically uniform, which is the
   GLSL half of what makes it legal (the device-feature half is in
-  `VulkanCreateDevice`, above).
+  `VulkanCreateDeviceCommon`, above).
 
   `Bind()` transitions the image to `SHADER_READ_ONLY_OPTIMAL` and returns its
   view. That transition is load-bearing: nothing but `UploadImage` would move
