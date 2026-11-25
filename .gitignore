@@ -392,3 +392,6 @@ obj-ios/
 bin-vk/
 lib-vk/
 obj-vk/
+
+# ROMs are never committed
+/roms
